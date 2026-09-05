@@ -1,13 +1,14 @@
 import 'dart:async';
 import 'dart:convert';
-import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter_vless/flutter_vless.dart';
 import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
 
 void main() {
+  WidgetsFlutterBinding.ensureInitialized();
   runApp(const LightSpeedApp());
 }
 
@@ -18,14 +19,21 @@ class LightSpeedApp extends StatelessWidget {
   Widget build(BuildContext context) {
     return MaterialApp(
       debugShowCheckedModeBanner: false,
-      title: 'Light speed',
+      title: 'Light speed 🔥',
       theme: ThemeData(
         useMaterial3: true,
         brightness: Brightness.dark,
-        scaffoldBackgroundColor: const Color(0xFF070910),
         colorScheme: ColorScheme.fromSeed(
-          seedColor: const Color(0xFF7C4DFF),
+          seedColor: Colors.deepPurple,
           brightness: Brightness.dark,
+        ),
+        scaffoldBackgroundColor: const Color(0xFF070812),
+        cardTheme: CardThemeData(
+          color: const Color(0xFF111322),
+          elevation: 0,
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(20),
+          ),
         ),
       ),
       home: const HomePage(),
@@ -33,47 +41,45 @@ class LightSpeedApp extends StatelessWidget {
   }
 }
 
-class Config {
-  final String raw;
-  final String type;
-  final String address;
-  final int? port;
-  final String name;
-  int? ping;
-
-  Config({
-    required this.raw,
-    required this.type,
-    required this.address,
-    required this.port,
-    this.name = '',
-    this.ping,
-  });
-}
-
 class SubscriptionInfo {
-  final int? upload;
-  final int? download;
-  final int? total;
-  final int? expire;
+  final int upload;
+  final int download;
+  final int total;
+  final int expire;
 
   const SubscriptionInfo({
-    this.upload,
-    this.download,
-    this.total,
-    this.expire,
+    this.upload = 0,
+    this.download = 0,
+    this.total = 0,
+    this.expire = 0,
   });
 
-  int? get used {
-    if (upload == null || download == null) return null;
-    return upload! + download!;
+  int get used => upload + download;
+
+  int get remaining {
+    if (total <= 0) return 0;
+    final value = total - used;
+    return value < 0 ? 0 : value;
   }
 
-  int? get remaining {
-    if (total == null || used == null) return null;
-    final result = total! - used!;
-    return result < 0 ? 0 : result;
+  double get progress {
+    if (total <= 0) return 0;
+    return (used / total).clamp(0.0, 1.0);
   }
+}
+
+class ServerItem {
+  final FlutterVlessURL profile;
+  final String name;
+  int? ping;
+  bool testing;
+
+  ServerItem({
+    required this.profile,
+    required this.name,
+    this.ping,
+    this.testing = false,
+  });
 }
 
 class HomePage extends StatefulWidget {
@@ -86,22 +92,43 @@ class HomePage extends StatefulWidget {
 class _HomePageState extends State<HomePage> {
   final TextEditingController urlController = TextEditingController();
 
-  List<Config> configs = [];
-  SubscriptionInfo? subscriptionInfo;
+  late final FlutterVless flutterVless;
+
+  VlessStatus vpnStatus = VlessStatus();
+
+  List<ServerItem> servers = [];
+
+  SubscriptionInfo subscription = const SubscriptionInfo();
+
+  Timer? timer;
 
   bool loading = false;
   bool testing = false;
+  bool initialized = false;
 
-  String message = 'لینک سابسکریپشن را وارد کنید';
+  String message = 'آدرس اشتراک را وارد کنید';
 
-  Timer? countdownTimer;
+  String? selectedServerName;
+
+  DateTime? expireDate;
 
   @override
   void initState() {
     super.initState();
-    loadSavedUrl();
 
-    countdownTimer = Timer.periodic(
+    flutterVless = FlutterVless(
+      onStatusChanged: (status) {
+        if (!mounted) return;
+
+        setState(() {
+          vpnStatus = status;
+        });
+      },
+    );
+
+    _initialize();
+
+    timer = Timer.periodic(
       const Duration(minutes: 1),
       (_) {
         if (mounted) {
@@ -111,39 +138,62 @@ class _HomePageState extends State<HomePage> {
     );
   }
 
+  Future<void> _initialize() async {
+    try {
+      await flutterVless.initializeVless(
+        notificationIconResourceType: 'mipmap',
+        notificationIconResourceName: 'ic_launcher',
+        providerBundleIdentifier: 'com.light.speed',
+        groupIdentifier: 'group.com.light.speed',
+      );
+
+      initialized = true;
+
+      final prefs = await SharedPreferences.getInstance();
+      final saved = prefs.getString('subscription_url');
+
+      if (saved != null && saved.isNotEmpty) {
+        urlController.text = saved;
+      }
+
+      if (mounted) {
+        setState(() {});
+      }
+    } catch (e) {
+      message = 'خطا در آماده‌سازی VPN: $e';
+
+      if (mounted) {
+        setState(() {});
+      }
+    }
+  }
+
   @override
   void dispose() {
-    countdownTimer?.cancel();
+    timer?.cancel();
     urlController.dispose();
     super.dispose();
   }
 
-  Future<void> loadSavedUrl() async {
-    final prefs = await SharedPreferences.getInstance();
-    final saved = prefs.getString('subscription_url');
+  bool get isConnected {
+    return vpnStatus.connectionState == VlessConnectionState.connected;
+  }
 
-    if (saved != null && saved.isNotEmpty) {
-      urlController.text = saved;
-    }
+  bool get isConnecting {
+    return vpnStatus.connectionState == VlessConnectionState.connecting ||
+        vpnStatus.connectionState == VlessConnectionState.disconnecting;
   }
 
   Future<void> loadSubscription() async {
-    final input = urlController.text.trim();
+    final url = urlController.text.trim();
 
-    if (input.isEmpty) {
-      setState(() {
-        message = 'لطفاً لینک سابسکریپشن را وارد کنید';
-      });
+    if (url.isEmpty) {
+      _showMessage('ابتدا لینک Subscription را وارد کنید');
       return;
     }
 
-    final uri = Uri.tryParse(input);
-
-    if (uri == null ||
-        (uri.scheme != 'http' && uri.scheme != 'https')) {
-      setState(() {
-        message = 'لینک وارد شده معتبر نیست';
-      });
+    if (!url.startsWith('http://') && !url.startsWith('https://')) {
+      _showMessage('لینک باید با http:// یا https:// شروع شود');
       return;
     }
 
@@ -151,164 +201,163 @@ class _HomePageState extends State<HomePage> {
 
     setState(() {
       loading = true;
-      configs = [];
-      subscriptionInfo = null;
-      message = 'در حال دریافت سابسکریپشن...';
+      message = 'در حال دریافت Subscription...';
+      servers = [];
+      selectedServerName = null;
     });
 
     try {
       final response = await http.get(
-        uri,
+        Uri.parse(url),
         headers: const {
           'User-Agent': 'LightSpeed/1.0',
           'Accept': '*/*',
           'Cache-Control': 'no-cache',
         },
-      ).timeout(const Duration(seconds: 25));
+      ).timeout(const Duration(seconds: 30));
 
-      if (response.statusCode < 200 ||
-          response.statusCode >= 300) {
+      if (response.statusCode < 200 || response.statusCode >= 300) {
         throw Exception(
           'HTTP ${response.statusCode}',
         );
       }
 
-      final info = parseSubscriptionInfo(response.headers);
+      final info = _parseSubscriptionInfo(response.headers, response.body);
 
-      final decoded = decodeSubscription(response.body);
+      final decoded = _decodeSubscription(response.body);
 
-      final extracted = extractConfigs(decoded);
+      final parsed = FlutterVless.parseMany(decoded);
 
-      final result = <Config>[];
-      final seen = <String>{};
+      final List<ServerItem> result = [];
 
-      for (final line in extracted) {
-        final config = parseConfig(line);
+      for (var i = 0; i < parsed.length; i++) {
+        final profile = parsed[i];
 
-        if (config == null) continue;
+        final name = profile.remark.trim().isEmpty
+            ? 'Server ${i + 1}'
+            : profile.remark.trim();
 
-        final key = config.raw;
-
-        if (seen.contains(key)) continue;
-
-        seen.add(key);
-        result.add(config);
+        result.add(
+          ServerItem(
+            profile: profile,
+            name: name,
+          ),
+        );
       }
 
       final prefs = await SharedPreferences.getInstance();
-
       await prefs.setString(
         'subscription_url',
-        input,
+        url,
       );
+
+      final expire = info.expire > 0
+          ? DateTime.fromMillisecondsSinceEpoch(
+              info.expire * 1000,
+            )
+          : null;
 
       if (!mounted) return;
 
       setState(() {
-        subscriptionInfo = info;
-        configs = result;
+        subscription = info;
+        expireDate = expire;
+        servers = result;
         loading = false;
+        message = result.isEmpty
+            ? 'هیچ کانفیگ قابل پشتیبانی پیدا نشد'
+            : '${result.length} سرور دریافت شد';
+      });
 
-        if (result.isEmpty) {
-          message =
-              'سابسکریپشن دریافت شد، اما کانفیگی پیدا نشد';
-        } else {
-          message =
-              '${result.length} سرور پیدا شد';
-        }
-      });
-    } on SocketException {
-      setState(() {
-        loading = false;
-        message =
-            'اتصال به سرور برقرار نشد';
-      });
-    } on TimeoutException {
-      setState(() {
-        loading = false;
-        message =
-            'زمان دریافت سابسکریپشن تمام شد';
-      });
-    } on HandshakeException {
-      setState(() {
-        loading = false;
-        message =
-            'خطای SSL در اتصال به سرور';
-      });
+      if (result.isNotEmpty) {
+        await testAllServers();
+      }
     } catch (e) {
+      if (!mounted) return;
+
       setState(() {
         loading = false;
-        message = 'خطا در دریافت سابسکریپشن';
+        message = 'خطا در دریافت Subscription';
       });
+
+      _showMessage(
+        'دریافت اشتراک ناموفق بود:\n$e',
+      );
     }
   }
 
-  SubscriptionInfo? parseSubscriptionInfo(
+  SubscriptionInfo _parseSubscriptionInfo(
     Map<String, String> headers,
+    String body,
   ) {
-    String? raw;
+    String? value;
 
     for (final entry in headers.entries) {
-      if (entry.key.toLowerCase() ==
-          'subscription-userinfo') {
-        raw = entry.value;
+      if (entry.key.toLowerCase() == 'subscription-userinfo') {
+        value = entry.value;
         break;
       }
     }
 
-    if (raw == null || raw.trim().isEmpty) {
-      return null;
+    value ??= _findUserInfo(body);
+
+    if (value == null || value.isEmpty) {
+      return const SubscriptionInfo();
     }
 
-    int? read(String key) {
+    int readNumber(String key) {
       final match = RegExp(
         '$key\\s*=\\s*(\\d+)',
         caseSensitive: false,
-      ).firstMatch(raw!);
+      ).firstMatch(value!);
 
-      if (match == null) return null;
-
-      return int.tryParse(match.group(1)!);
+      return int.tryParse(match?.group(1) ?? '') ?? 0;
     }
 
     return SubscriptionInfo(
-      upload: read('upload'),
-      download: read('download'),
-      total: read('total'),
-      expire: read('expire'),
+      upload: readNumber('upload'),
+      download: readNumber('download'),
+      total: readNumber('total'),
+      expire: readNumber('expire'),
     );
   }
 
-  String decodeSubscription(String body) {
-    var text = body
-        .replaceAll('\uFEFF', '')
-        .trim();
+  String? _findUserInfo(String text) {
+    final match = RegExp(
+      r'(?:subscription-userinfo|upload)\s*[:=][^\r\n]+',
+      caseSensitive: false,
+    ).firstMatch(text);
 
-    if (extractConfigs(text).isNotEmpty) {
-      return text;
-    }
+    return match?.group(0);
+  }
 
-    for (int i = 0; i < 4; i++) {
-      final decoded = decodeBase64(text);
+  String _decodeSubscription(String source) {
+    var current = source.trim();
 
-      if (decoded == null ||
-          decoded.trim().isEmpty) {
+    for (var i = 0; i < 8; i++) {
+      final decoded = _tryBase64(current);
+
+      if (decoded == null) {
         break;
       }
 
-      text = decoded
-          .replaceAll('\uFEFF', '')
-          .trim();
+      final clean = decoded.trim();
 
-      if (extractConfigs(text).isNotEmpty) {
-        return text;
+      if (clean.isEmpty || clean == current) {
+        break;
       }
+
+      if (_containsKnownConfig(clean)) {
+        return clean;
+      }
+
+      current = clean;
     }
 
-    return text;
+    return current;
   }
 
-  String? decodeBase64(String input) {
+  String? _tryBase64(String input) {
     try {
       var value = input
           .replaceAll(RegExp(r'\s+'), '')
@@ -320,7 +369,6 @@ class _HomePageState extends State<HomePage> {
       }
 
       final bytes = base64Decode(value);
-
       return utf8.decode(
         bytes,
         allowMalformed: true,
@@ -330,325 +378,215 @@ class _HomePageState extends State<HomePage> {
     }
   }
 
-  List<String> extractConfigs(String text) {
-    final result = <String>[];
-
-    final regex = RegExp(
-      r'(vless|vmess|trojan|ss|ssr|hysteria2?|hy2?|hy)://[^\s"<>]+',
+  bool _containsKnownConfig(String value) {
+    return RegExp(
+      r'(vless|vmess|trojan|ss|ssr|hysteria2|hy2)://',
       caseSensitive: false,
-    );
-
-    for (final match in regex.allMatches(text)) {
-      var value = match.group(0)!.trim();
-
-      while (
-          value.endsWith(',') ||
-          value.endsWith('}') ||
-          value.endsWith(']') ||
-          value.endsWith("'")) {
-        value =
-            value.substring(0, value.length - 1);
-      }
-
-      result.add(value);
-    }
-
-    return result;
-  }
-
-  Config? parseConfig(String value) {
-    var raw = value
-        .replaceAll('"', '')
-        .replaceAll("'", '')
-        .trim();
-
-    final uri = Uri.tryParse(raw);
-
-    if (uri == null) return null;
-
-    final scheme = uri.scheme.toLowerCase();
-
-    const supported = {
-      'vless',
-      'vmess',
-      'trojan',
-      'ss',
-      'ssr',
-      'hysteria',
-      'hysteria2',
-      'hy2',
-      'hy',
-    };
-
-    if (!supported.contains(scheme)) {
-      return null;
-    }
-
-    if (scheme == 'vmess') {
-      final vmess = parseVmess(raw);
-
-      if (vmess != null) {
-        return vmess;
-      }
-    }
-
-    final address = uri.host;
-
-    if (address.isEmpty) {
-      return null;
-    }
-
-    String name = '';
-
-    final fragment = uri.fragment;
-
-    if (fragment.isNotEmpty) {
-      name = Uri.decodeComponent(fragment);
-    }
-
-    return Config(
-      raw: raw,
-      type: scheme.toUpperCase(),
-      address: address,
-      port: uri.hasPort ? uri.port : null,
-      name: name,
-    );
-  }
-
-  Config? parseVmess(String raw) {
-    try {
-      final encoded =
-          raw.substring('vmess://'.length);
-
-      final decoded = decodeBase64(encoded);
-
-      if (decoded == null) return null;
-
-      final data =
-          jsonDecode(decoded);
-
-      if (data is! Map) return null;
-
-      final address =
-          (data['add'] ?? '').toString();
-
-      final portValue =
-          int.tryParse(
-        (data['port'] ?? '').toString(),
-      );
-
-      final name =
-          (data['ps'] ?? '').toString();
-
-      if (address.isEmpty) return null;
-
-      return Config(
-        raw: raw,
-        type: 'VMESS',
-        address: address,
-        port: portValue,
-        name: name,
-      );
-    } catch (_) {
-      return null;
-    }
-  }
-
-  Future<int?> testServer(
-    Config config,
-  ) async {
-    if (config.address.isEmpty ||
-        config.port == null) {
-      return null;
-    }
-
-    final stopwatch = Stopwatch()..start();
-
-    try {
-      final socket =
-          await Socket.connect(
-        config.address,
-        config.port!,
-        timeout:
-            const Duration(seconds: 3),
-      );
-
-      stopwatch.stop();
-
-      socket.destroy();
-
-      return stopwatch.elapsedMilliseconds;
-    } catch (_) {
-      return null;
-    }
+    ).hasMatch(value);
   }
 
   Future<void> testAllServers() async {
-    if (configs.isEmpty) {
-      setState(() {
-        message =
-            'ابتدا سابسکریپشن را دریافت کنید';
-      });
-      return;
-    }
+    if (servers.isEmpty || testing) return;
 
     setState(() {
       testing = true;
-      message =
-          'در حال تست سرعت سرورها...';
+      message = 'در حال تست سرعت سرورها...';
     });
 
-    const batchSize = 8;
+    for (final server in servers) {
+      if (!mounted) return;
 
-    for (int i = 0;
-        i < configs.length;
-        i += batchSize) {
-      final end =
-          (i + batchSize < configs.length)
-              ? i + batchSize
-              : configs.length;
+      setState(() {
+        server.testing = true;
+      });
 
-      final batch =
-          configs.sublist(i, end);
+      try {
+        final delay = await flutterVless.getServerDelay(
+          config: server.profile.getFullConfiguration(),
+        );
 
-      await Future.wait(
-        batch.map(
-          (config) async {
-            config.ping =
-                await testServer(config);
-          },
-        ),
-      );
+        server.ping = delay;
+      } catch (_) {
+        server.ping = null;
+      }
 
       if (mounted) {
-        setState(() {});
+        setState(() {
+          server.testing = false;
+        });
       }
     }
 
-    configs.sort((a, b) {
-      if (a.ping == null &&
-          b.ping == null) {
-        return 0;
-      }
+    servers.sort(
+      (a, b) {
+        final ap = a.ping ?? 999999;
+        final bp = b.ping ?? 999999;
+        return ap.compareTo(bp);
+      },
+    );
 
-      if (a.ping == null) return 1;
+    if (servers.isNotEmpty) {
+      selectedServerName = servers.first.name;
+    }
 
-      if (b.ping == null) return -1;
-
-      return a.ping!
-          .compareTo(b.ping!);
-    });
-
-    if (!mounted) return;
-
-    setState(() {
-      testing = false;
-
-      final best = getBestServer();
-
-      if (best == null) {
-        message =
-            'هیچ سروری پاسخ نداد';
-      } else {
-        message =
-            'سریع‌ترین سرور: ${best.ping} ms';
-      }
-    });
+    if (mounted) {
+      setState(() {
+        testing = false;
+        message = 'تست سرورها تمام شد';
+      });
+    }
   }
 
-  Config? getBestServer() {
-    final available = configs
-        .where((config) =>
-            config.ping != null)
+  ServerItem? get bestServer {
+    final available = servers
+        .where((server) => server.ping != null)
         .toList();
 
     if (available.isEmpty) {
-      return null;
+      return servers.isEmpty ? null : servers.first;
     }
 
     available.sort(
-      (a, b) =>
-          a.ping!.compareTo(b.ping!),
+      (a, b) => a.ping!.compareTo(b.ping!),
     );
 
     return available.first;
   }
 
-  String formatBytes(int? bytes) {
-    if (bytes == null) {
-      return 'نامشخص';
+  Future<void> connectVpn() async {
+    if (!initialized) {
+      _showMessage('VPN هنوز آماده نشده است');
+      return;
     }
 
-    if (bytes < 1024) {
-      return '$bytes B';
+    if (servers.isEmpty) {
+      _showMessage('ابتدا Subscription را دریافت کنید');
+      return;
     }
 
-    if (bytes <
-        1024 * 1024) {
-      return
-          '${(bytes / 1024).toStringAsFixed(1)} KB';
+    final server = bestServer;
+
+    if (server == null) {
+      _showMessage('سروری برای اتصال وجود ندارد');
+      return;
     }
 
-    if (bytes <
-        1024 * 1024 * 1024) {
-      return
-          '${(bytes / (1024 * 1024)).toStringAsFixed(1)} MB';
-    }
+    try {
+      setState(() {
+        message = 'در حال اتصال به ${server.name}...';
+        selectedServerName = server.name;
+      });
 
-    if (bytes <
-        1024 *
-            1024 *
-            1024 *
-            1024) {
-      return
-          '${(bytes / (1024 * 1024 * 1024)).toStringAsFixed(1)} GB';
-    }
+      final permission = await flutterVless.requestPermission();
 
-    return
-        '${(bytes / (1024 * 1024 * 1024 * 1024)).toStringAsFixed(1)} TB';
+      if (!permission) {
+        _showMessage('مجوز VPN داده نشد');
+        return;
+      }
+
+      await flutterVless.startVless(
+        remark: server.name,
+        config: server.profile.getFullConfiguration(),
+        proxyOnly: false,
+        notificationDisconnectButtonName: 'قطع اتصال',
+      );
+    } catch (e) {
+      _showMessage(
+        'اتصال VPN ناموفق بود:\n$e',
+      );
+    }
   }
 
-  String formatExpire(int? expire) {
-    if (expire == null ||
-        expire <= 0) {
-      return 'نامشخص';
+  Future<void> disconnectVpn() async {
+    try {
+      await flutterVless.stopVless();
+
+      if (mounted) {
+        setState(() {
+          message = 'VPN قطع شد';
+        });
+      }
+    } catch (e) {
+      _showMessage(
+        'خطا در قطع VPN:\n$e',
+      );
     }
-
-    final date =
-        DateTime.fromMillisecondsSinceEpoch(
-      expire * 1000,
-    ).toLocal();
-
-    return '${date.year}/'
-        '${date.month.toString().padLeft(2, '0')}/'
-        '${date.day.toString().padLeft(2, '0')}';
   }
 
-  String remainingTime(int? expire) {
-    if (expire == null ||
-        expire <= 0) {
-      return 'نامشخص';
+  Future<void> connectBestServer() async {
+    if (servers.isEmpty) {
+      await loadSubscription();
+      return;
     }
 
-    final expiration =
-        DateTime.fromMillisecondsSinceEpoch(
-      expire * 1000,
+    await connectVpn();
+  }
+
+  void _showMessage(String text) {
+    if (!mounted) return;
+
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(text),
+        duration: const Duration(seconds: 4),
+      ),
     );
+  }
 
-    final now = DateTime.now();
+  String formatBytes(int bytes) {
+    if (bytes <= 0) return '0 B';
 
-    if (expiration.isBefore(now)) {
+    const units = [
+      'B',
+      'KB',
+      'MB',
+      'GB',
+      'TB',
+    ];
+
+    double value = bytes.toDouble();
+    var index = 0;
+
+    while (value >= 1024 && index < units.length - 1) {
+      value /= 1024;
+      index++;
+    }
+
+    if (value >= 100) {
+      return '${value.toStringAsFixed(0)} ${units[index]}';
+    }
+
+    if (value >= 10) {
+      return '${value.toStringAsFixed(1)} ${units[index]}';
+    }
+
+    return '${value.toStringAsFixed(2)} ${units[index]}';
+  }
+
+  String formatDate(DateTime? date) {
+    if (date == null) return 'نامشخص';
+
+    final y = date.year.toString();
+    final m = date.month.toString().padLeft(2, '0');
+    final d = date.day.toString().padLeft(2, '0');
+
+    return '$y/$m/$d';
+  }
+
+  String remainingTime() {
+    if (expireDate == null) {
+      return 'نامشخص';
+    }
+
+    final difference = expireDate!.difference(DateTime.now());
+
+    if (difference.isNegative) {
       return 'منقضی شده';
     }
 
-    final difference =
-        expiration.difference(now);
-
     final days = difference.inDays;
-    final hours =
-        difference.inHours % 24;
-    final minutes =
-        difference.inMinutes % 60;
+    final hours = difference.inHours % 24;
+    final minutes = difference.inMinutes % 60;
 
     if (days > 0) {
       return '$days روز و $hours ساعت';
@@ -661,26 +599,8 @@ class _HomePageState extends State<HomePage> {
     return '$minutes دقیقه';
   }
 
-  double usagePercent() {
-    final info = subscriptionInfo;
-
-    if (info == null ||
-        info.total == null ||
-        info.total! <= 0 ||
-        info.used == null) {
-      return 0;
-    }
-
-    final value =
-        info.used! / info.total!;
-
-    return value.clamp(0.0, 1.0);
-  }
-
   Color pingColor(int? ping) {
-    if (ping == null) {
-      return Colors.grey;
-    }
+    if (ping == null) return Colors.grey;
 
     if (ping < 100) {
       return Colors.greenAccent;
@@ -693,801 +613,596 @@ class _HomePageState extends State<HomePage> {
     return Colors.redAccent;
   }
 
-  Widget card({
-    required Widget child,
-  }) {
-    return Container(
-      width: double.infinity,
-      padding:
-          const EdgeInsets.all(18),
-      decoration: BoxDecoration(
-        color: const Color(0xFF111522),
-        borderRadius:
-            BorderRadius.circular(24),
-        border: Border.all(
-          color:
-              Colors.white.withOpacity(0.07),
-        ),
-      ),
-      child: child,
-    );
+  String statusText() {
+    switch (vpnStatus.connectionState) {
+      case VlessConnectionState.connected:
+        return 'متصل';
+      case VlessConnectionState.connecting:
+        return 'در حال اتصال';
+      case VlessConnectionState.disconnecting:
+        return 'در حال قطع اتصال';
+      case VlessConnectionState.disconnected:
+        return 'قطع';
+      default:
+        return 'آماده';
+    }
   }
 
-  Widget titleRow(
-    String title,
-    IconData icon,
-  ) {
-    return Row(
-      children: [
-        Container(
-          padding:
-              const EdgeInsets.all(9),
-          decoration: BoxDecoration(
-            color: const Color(
-              0xFF7C4DFF,
-            ).withOpacity(0.14),
-            borderRadius:
-                BorderRadius.circular(12),
-          ),
-          child: Icon(
-            icon,
-            color:
-                const Color(0xFFB388FF),
-            size: 20,
-          ),
-        ),
-        const SizedBox(width: 10),
-        Text(
-          title,
-          style: const TextStyle(
-            fontSize: 18,
-            fontWeight:
-                FontWeight.bold,
-          ),
-        ),
-      ],
-    );
-  }
-
-  Widget buildHeader() {
-    return Row(
-      children: [
-        Container(
-          width: 55,
-          height: 55,
-          decoration: BoxDecoration(
-            gradient:
-                const LinearGradient(
-              colors: [
-                Color(0xFF7C4DFF),
-                Color(0xFF536DFE),
-              ],
-            ),
-            borderRadius:
-                BorderRadius.circular(17),
-          ),
-          child: const Icon(
-            Icons.bolt_rounded,
-            color: Colors.white,
-            size: 34,
-          ),
-        ),
-        const SizedBox(width: 14),
-        const Column(
-          crossAxisAlignment:
-              CrossAxisAlignment.start,
-          children: [
-            Text(
-              'Light speed 🔥',
-              style: TextStyle(
-                fontSize: 24,
-                fontWeight:
-                    FontWeight.w800,
-              ),
-            ),
-            Text(
-              'سریع • امن • قدرتمند',
-              style: TextStyle(
-                color: Colors.white54,
-                fontSize: 12,
-              ),
-            ),
-          ],
-        ),
-      ],
-    );
-  }
-
-  Widget buildSubscriptionInput() {
-    return card(
-      child: Column(
-        crossAxisAlignment:
-            CrossAxisAlignment.start,
-        children: [
-          titleRow(
-            'Subscription',
-            Icons.link_rounded,
-          ),
-          const SizedBox(height: 15),
-          TextField(
-            controller: urlController,
-            keyboardType:
-                TextInputType.url,
-            decoration:
-                InputDecoration(
-              hintText:
-                  'لینک سابسکریپشن',
-              prefixIcon:
-                  const Icon(
-                Icons.language,
-              ),
-              filled: true,
-              fillColor:
-                  const Color(
-                      0xFF080A12),
-              border:
-                  OutlineInputBorder(
-                borderRadius:
-                    BorderRadius.circular(
-                        16),
-                borderSide:
-                    BorderSide.none,
-              ),
-            ),
-          ),
-          const SizedBox(height: 14),
-          SizedBox(
-            width: double.infinity,
-            height: 52,
-            child: ElevatedButton.icon(
-              onPressed: loading
-                  ? null
-                  : loadSubscription,
-              icon: loading
-                  ? const SizedBox(
-                      width: 20,
-                      height: 20,
-                      child:
-                          CircularProgressIndicator(
-                        strokeWidth: 2,
-                      ),
-                    )
-                  : const Icon(
-                      Icons.download_rounded,
-                    ),
-              label: Text(
-                loading
-                    ? 'در حال دریافت...'
-                    : 'دریافت سابسکریپشن',
-              ),
-              style:
-                  ElevatedButton.styleFrom(
-                backgroundColor:
-                    const Color(
-                        0xFF7C4DFF),
-                foregroundColor:
-                    Colors.white,
-                shape:
-                    RoundedRectangleBorder(
-                  borderRadius:
-                      BorderRadius.circular(
-                          16),
-                ),
-              ),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget buildConnection() {
-    final best =
-        getBestServer();
-
-    return Container(
-      padding:
-          const EdgeInsets.all(22),
-      decoration: BoxDecoration(
-        gradient:
-            const LinearGradient(
-          colors: [
-            Color(0xFF1B1433),
-            Color(0xFF10131F),
-          ],
-        ),
-        borderRadius:
-            BorderRadius.circular(28),
-      ),
-      child: Column(
-        children: [
-          const Text(
-            'وضعیت اتصال',
-            style: TextStyle(
-              color: Colors.white54,
-            ),
-          ),
-          const SizedBox(height: 15),
-          Container(
-            width: 85,
-            height: 85,
-            decoration: BoxDecoration(
-              shape: BoxShape.circle,
-              color: const Color(
-                0xFF7C4DFF,
-              ).withOpacity(0.12),
-              border: Border.all(
-                color: const Color(
-                  0xFF7C4DFF,
-                ).withOpacity(0.4),
-                width: 2,
-              ),
-            ),
-            child: const Icon(
-              Icons.power_settings_new_rounded,
-              color:
-                  Color(0xFFB388FF),
-              size: 42,
-            ),
-          ),
-          const SizedBox(height: 12),
-          const Text(
-            'متصل نیست',
-            style: TextStyle(
-              fontSize: 21,
-              fontWeight:
-                  FontWeight.bold,
-            ),
-          ),
-          const SizedBox(height: 5),
-          Text(
-            best == null
-                ? 'سروری انتخاب نشده'
-                : 'بهترین Ping: ${best.ping} ms',
-            style: const TextStyle(
-              color: Colors.white54,
-            ),
-          ),
-          const SizedBox(height: 18),
-          SizedBox(
-            width: double.infinity,
-            height: 52,
-            child: ElevatedButton.icon(
-              onPressed: best == null
-                  ? null
-                  : () {
-                      ScaffoldMessenger
-                          .of(context)
-                          .showSnackBar(
-                        const SnackBar(
-                          content: Text(
-                            'اتصال واقعی VPN هنوز فعال نشده است',
-                          ),
-                        ),
-                      );
-                    },
-              icon: const Icon(
-                Icons.bolt_rounded,
-              ),
-              label: const Text(
-                'اتصال سریع',
-                style: TextStyle(
-                  fontWeight:
-                      FontWeight.bold,
-                ),
-              ),
-              style:
-                  ElevatedButton.styleFrom(
-                backgroundColor:
-                    const Color(
-                        0xFF7C4DFF),
-                foregroundColor:
-                    Colors.white,
-                shape:
-                    RoundedRectangleBorder(
-                  borderRadius:
-                      BorderRadius.circular(
-                          16),
-                ),
-              ),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget statBox(
+  Widget infoTile(
     String title,
     String value,
     IconData icon,
   ) {
-    return Expanded(
-      child: Container(
-        padding:
-            const EdgeInsets.all(13),
-        decoration: BoxDecoration(
-          color:
-              const Color(0xFF080A12),
-          borderRadius:
-              BorderRadius.circular(16),
-        ),
-        child: Column(
-          children: [
-            Icon(
-              icon,
-              color:
-                  const Color(0xFFB388FF),
-              size: 21,
-            ),
-            const SizedBox(height: 7),
-            Text(
-              title,
-              style:
-                  const TextStyle(
-                color: Colors.white54,
-                fontSize: 10,
-              ),
-            ),
-            const SizedBox(height: 4),
-            Text(
-              value,
-              textAlign:
-                  TextAlign.center,
-              style:
-                  const TextStyle(
-                fontSize: 12,
-                fontWeight:
-                    FontWeight.bold,
-              ),
-            ),
-          ],
-        ),
+    return Container(
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: const Color(0xFF181A2A),
+        borderRadius: BorderRadius.circular(16),
       ),
-    );
-  }
-
-  Widget buildSubscriptionInfo() {
-    final info =
-        subscriptionInfo;
-
-    if (info == null) {
-      return card(
-        child: Column(
-          children: [
-            titleRow(
-              'اطلاعات اشتراک',
-              Icons.data_usage_rounded,
-            ),
-            const SizedBox(height: 18),
-            const Text(
-              'اطلاعات حجم و زمان هنوز دریافت نشده است',
-              textAlign:
-                  TextAlign.center,
-              style: TextStyle(
-                color: Colors.white54,
-              ),
-            ),
-          ],
-        ),
-      );
-    }
-
-    final percent =
-        usagePercent();
-
-    return card(
-      child: Column(
-        crossAxisAlignment:
-            CrossAxisAlignment.start,
+      child: Row(
         children: [
-          titleRow(
-            'اطلاعات اشتراک',
-            Icons.data_usage_rounded,
+          Icon(
+            icon,
+            color: Colors.deepPurpleAccent,
+            size: 25,
           ),
-          const SizedBox(height: 20),
-          Row(
-            children: [
-              Expanded(
-                child: Column(
-                  crossAxisAlignment:
-                      CrossAxisAlignment.start,
-                  children: [
-                    const Text(
-                      'حجم باقی‌مانده',
-                      style: TextStyle(
-                        color: Colors.white54,
-                        fontSize: 12,
-                      ),
-                    ),
-                    const SizedBox(height: 4),
-                    Text(
-                      formatBytes(
-                        info.remaining,
-                      ),
-                      style:
-                          const TextStyle(
-                        fontSize: 24,
-                        fontWeight:
-                            FontWeight.w800,
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-              Column(
-                crossAxisAlignment:
-                    CrossAxisAlignment.end,
-                children: [
-                  const Text(
-                    'حجم کل',
-                    style: TextStyle(
-                      color: Colors.white54,
-                      fontSize: 12,
-                    ),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  title,
+                  style: const TextStyle(
+                    color: Colors.white60,
+                    fontSize: 12,
                   ),
-                  const SizedBox(height: 4),
-                  Text(
-                    formatBytes(
-                      info.total,
-                    ),
-                    style:
-                        const TextStyle(
-                      fontWeight:
-                          FontWeight.bold,
-                    ),
+                ),
+                const SizedBox(height: 4),
+                Text(
+                  value,
+                  style: const TextStyle(
+                    fontWeight: FontWeight.bold,
+                    fontSize: 15,
                   ),
-                ],
-              ),
-            ],
-          ),
-          const SizedBox(height: 14),
-          ClipRRect(
-            borderRadius:
-                BorderRadius.circular(20),
-            child:
-                LinearProgressIndicator(
-              value: percent,
-              minHeight: 10,
-              backgroundColor:
-                  Colors.white10,
-              valueColor:
-                  const AlwaysStoppedAnimation(
-                Color(0xFF7C4DFF),
-              ),
-            ),
-          ),
-          const SizedBox(height: 7),
-          Text(
-            '${(percent * 100).toStringAsFixed(1)}٪ مصرف شده',
-            style: const TextStyle(
-              color: Colors.white54,
-              fontSize: 11,
-            ),
-          ),
-          const SizedBox(height: 15),
-          Row(
-            children: [
-              statBox(
-                'مصرف شده',
-                formatBytes(info.used),
-                Icons.pie_chart_rounded,
-              ),
-              const SizedBox(width: 8),
-              statBox(
-                'آپلود',
-                formatBytes(info.upload),
-                Icons.upload_rounded,
-              ),
-              const SizedBox(width: 8),
-              statBox(
-                'دانلود',
-                formatBytes(info.download),
-                Icons.download_rounded,
-              ),
-            ],
-          ),
-          const SizedBox(height: 8),
-          Row(
-            children: [
-              statBox(
-                'زمان باقی‌مانده',
-                remainingTime(
-                  info.expire,
                 ),
-                Icons.timer_rounded,
-              ),
-              const SizedBox(width: 8),
-              statBox(
-                'تاریخ انقضا',
-                formatExpire(
-                  info.expire,
-                ),
-                Icons.event_rounded,
-              ),
-              const SizedBox(width: 8),
-              statBox(
-                'تعداد سرور',
-                '${configs.length}',
-                Icons.dns_rounded,
-              ),
-            ],
+              ],
+            ),
           ),
         ],
       ),
     );
   }
 
-  Widget buildServers() {
-    if (configs.isEmpty) {
-      return const SizedBox.shrink();
-    }
-
-    return Column(
-      crossAxisAlignment:
-          CrossAxisAlignment.start,
-      children: [
-        titleRow(
-          'همه سرورها',
-          Icons.public_rounded,
-        ),
-        const SizedBox(height: 13),
-        ...configs.asMap().entries.map(
-          (entry) {
-            final config =
-                entry.value;
-
-            final best =
-                entry.key == 0 &&
-                    config.ping != null;
-
-            return Container(
-              margin:
-                  const EdgeInsets.only(
-                      bottom: 9),
-              decoration:
-                  BoxDecoration(
-                color: const Color(
-                    0xFF111522),
-                borderRadius:
-                    BorderRadius.circular(
-                        19),
-                border: Border.all(
-                  color: best
-                      ? const Color(
-                          0xFF7C4DFF)
-                      : Colors.white
-                          .withOpacity(
-                              0.05),
+  Widget buildSubscriptionCard() {
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(18),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Row(
+              children: [
+                Icon(
+                  Icons.data_usage,
+                  color: Colors.deepPurpleAccent,
                 ),
+                SizedBox(width: 8),
+                Text(
+                  'اطلاعات اشتراک',
+                  style: TextStyle(
+                    fontSize: 18,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 16),
+
+            Row(
+              children: [
+                Expanded(
+                  child: infoTile(
+                    'حجم کل',
+                    formatBytes(subscription.total),
+                    Icons.storage_rounded,
+                  ),
+                ),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: infoTile(
+                    'باقی‌مانده',
+                    formatBytes(subscription.remaining),
+                    Icons.data_saver_on,
+                  ),
+                ),
+              ],
+            ),
+
+            const SizedBox(height: 10),
+
+            Row(
+              children: [
+                Expanded(
+                  child: infoTile(
+                    'مصرف شده',
+                    formatBytes(subscription.used),
+                    Icons.bar_chart,
+                  ),
+                ),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: infoTile(
+                    'دانلود',
+                    formatBytes(subscription.download),
+                    Icons.download,
+                  ),
+                ),
+              ],
+            ),
+
+            const SizedBox(height: 10),
+
+            Row(
+              children: [
+                Expanded(
+                  child: infoTile(
+                    'آپلود',
+                    formatBytes(subscription.upload),
+                    Icons.upload,
+                  ),
+                ),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: infoTile(
+                    'سرورها',
+                    '${servers.length}',
+                    Icons.dns,
+                  ),
+                ),
+              ],
+            ),
+
+            const SizedBox(height: 16),
+
+            ClipRRect(
+              borderRadius: BorderRadius.circular(10),
+              child: LinearProgressIndicator(
+                minHeight: 9,
+                value: subscription.progress,
               ),
-              child: ListTile(
-                contentPadding:
-                    const EdgeInsets
-                        .symmetric(
-                  horizontal: 14,
-                  vertical: 4,
-                ),
-                leading: Container(
-                  width: 44,
-                  height: 44,
-                  decoration:
-                      BoxDecoration(
-                    color: pingColor(
-                      config.ping,
-                    ).withOpacity(
-                      0.12,
-                    ),
-                    borderRadius:
-                        BorderRadius
-                            .circular(14),
-                  ),
-                  child: Icon(
-                    Icons.dns_rounded,
-                    color: pingColor(
-                      config.ping,
-                    ),
+            ),
+
+            const SizedBox(height: 8),
+
+            Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                Text(
+                  'مصرف: ${formatBytes(subscription.used)}',
+                  style: const TextStyle(
+                    color: Colors.white60,
+                    fontSize: 12,
                   ),
                 ),
-                title: Text(
-                  config.name.isNotEmpty
-                      ? config.name
-                      : '${config.type} • ${config.address}',
-                  maxLines: 1,
-                  overflow:
-                      TextOverflow.ellipsis,
-                  style:
-                      const TextStyle(
-                    fontSize: 13,
-                    fontWeight:
-                        FontWeight.bold,
+                Text(
+                  'باقی: ${formatBytes(subscription.remaining)}',
+                  style: const TextStyle(
+                    color: Colors.white60,
+                    fontSize: 12,
                   ),
                 ),
-                subtitle: Text(
-                  '${config.type}  •  ${config.address}:${config.port ?? '-'}',
-                  maxLines: 1,
-                  overflow:
-                      TextOverflow.ellipsis,
-                  style:
-                      const TextStyle(
-                    color: Colors.white38,
-                    fontSize: 10,
+              ],
+            ),
+
+            const SizedBox(height: 16),
+
+            Container(
+              width: double.infinity,
+              padding: const EdgeInsets.all(14),
+              decoration: BoxDecoration(
+                color: const Color(0xFF181A2A),
+                borderRadius: BorderRadius.circular(16),
+              ),
+              child: Column(
+                children: [
+                  Row(
+                    mainAxisAlignment:
+                        MainAxisAlignment.spaceBetween,
+                    children: [
+                      const Text('تاریخ انقضا'),
+                      Text(
+                        formatDate(expireDate),
+                        style: const TextStyle(
+                          fontWeight: FontWeight.bold,
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 10),
+                  Row(
+                    mainAxisAlignment:
+                        MainAxisAlignment.spaceBetween,
+                    children: [
+                      const Text('زمان باقی‌مانده'),
+                      Text(
+                        remainingTime(),
+                        style: TextStyle(
+                          color: expireDate != null &&
+                                  expireDate!
+                                      .difference(DateTime.now())
+                                      .isNegative
+                              ? Colors.redAccent
+                              : Colors.greenAccent,
+                          fontWeight: FontWeight.bold,
+                        ),
+                      ),
+                    ],
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget buildConnectionCard() {
+    final server = bestServer;
+
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(18),
+        child: Column(
+          children: [
+            Stack(
+              alignment: Alignment.center,
+              children: [
+                SizedBox(
+                  width: 190,
+                  height: 190,
+                  child: CircularProgressIndicator(
+                    value: isConnected ? null : 0,
+                    strokeWidth: 8,
+                    color: isConnected
+                        ? Colors.greenAccent
+                        : Colors.deepPurpleAccent,
+                    backgroundColor:
+                        Colors.white10,
                   ),
                 ),
-                trailing: Column(
-                  mainAxisAlignment:
-                      MainAxisAlignment.center,
-                  crossAxisAlignment:
-                      CrossAxisAlignment.end,
+                Column(
                   children: [
+                    Icon(
+                      isConnected
+                          ? Icons.shield
+                          : Icons.power_settings_new,
+                      size: 52,
+                      color: isConnected
+                          ? Colors.greenAccent
+                          : Colors.white70,
+                    ),
+                    const SizedBox(height: 10),
                     Text(
-                      config.ping == null
-                          ? 'تست نشده'
-                          : '${config.ping} ms',
-                      style:
-                          TextStyle(
-                        color:
-                            pingColor(
-                          config.ping,
-                        ),
-                        fontWeight:
-                            FontWeight.bold,
-                        fontSize: 12,
+                      statusText(),
+                      style: const TextStyle(
+                        fontSize: 20,
+                        fontWeight: FontWeight.bold,
                       ),
                     ),
-                    if (best)
-                      const Text(
-                        'سریع‌ترین',
-                        style:
-                            TextStyle(
-                          color:
-                              Colors.amber,
-                          fontSize: 9,
-                        ),
-                      ),
                   ],
                 ),
-                onTap: () {
-                  Clipboard.setData(
-                    ClipboardData(
-                      text: config.raw,
-                    ),
-                  );
+              ],
+            ),
 
-                  ScaffoldMessenger
-                      .of(context)
-                      .showSnackBar(
-                    const SnackBar(
-                      content: Text(
-                        'کانفیگ کپی شد',
+            const SizedBox(height: 18),
+
+            Text(
+              selectedServerName ??
+                  server?.name ??
+                  'هیچ سروری انتخاب نشده',
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: const TextStyle(
+                fontSize: 16,
+                fontWeight: FontWeight.bold,
+              ),
+            ),
+
+            const SizedBox(height: 6),
+
+            Text(
+              server?.ping != null
+                  ? 'Ping: ${server!.ping} ms'
+                  : 'Ping: -',
+              style: TextStyle(
+                color: pingColor(server?.ping),
+              ),
+            ),
+
+            const SizedBox(height: 18),
+
+            SizedBox(
+              width: double.infinity,
+              height: 55,
+              child: FilledButton.icon(
+                onPressed: isConnecting
+                    ? null
+                    : isConnected
+                        ? disconnectVpn
+                        : connectBestServer,
+                icon: Icon(
+                  isConnected
+                      ? Icons.stop_circle
+                      : Icons.flash_on,
+                ),
+                label: Text(
+                  isConnected
+                      ? 'قطع اتصال'
+                      : 'اتصال به سریع‌ترین سرور',
+                  style: const TextStyle(
+                    fontSize: 16,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget buildServerList() {
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(18),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              mainAxisAlignment:
+                  MainAxisAlignment.spaceBetween,
+              children: [
+                const Text(
+                  'سرورها',
+                  style: TextStyle(
+                    fontSize: 18,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+                IconButton(
+                  onPressed: testing
+                      ? null
+                      : testAllServers,
+                  icon: const Icon(Icons.speed),
+                  tooltip: 'تست سرعت',
+                ),
+              ],
+            ),
+
+            const SizedBox(height: 10),
+
+            if (servers.isEmpty)
+              const Padding(
+                padding: EdgeInsets.all(20),
+                child: Center(
+                  child: Text(
+                    'هنوز سروری دریافت نشده است',
+                    style: TextStyle(
+                      color: Colors.white54,
+                    ),
+                  ),
+                ),
+              ),
+
+            ...servers.asMap().entries.map(
+              (entry) {
+                final index = entry.key;
+                final server = entry.value;
+
+                return Container(
+                  margin: const EdgeInsets.only(
+                    bottom: 8,
+                  ),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFF181A2A),
+                    borderRadius:
+                        BorderRadius.circular(15),
+                    border: Border.all(
+                      color: selectedServerName ==
+                              server.name
+                          ? Colors.deepPurpleAccent
+                          : Colors.transparent,
+                    ),
+                  ),
+                  child: ListTile(
+                    onTap: () {
+                      setState(() {
+                        selectedServerName =
+                            server.name;
+                      });
+                    },
+                    leading: CircleAvatar(
+                      backgroundColor:
+                          Colors.deepPurple.withValues(
+                        alpha: 0.25,
+                      ),
+                      child: Text(
+                        '${index + 1}',
                       ),
                     ),
-                  );
-                },
-              ),
-            );
-          },
+                    title: Text(
+                      server.name,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                    subtitle: Text(
+                      server.testing
+                          ? 'در حال تست...'
+                          : server.ping == null
+                              ? 'تست نشده'
+                              : '${server.ping} ms',
+                      style: TextStyle(
+                        color: pingColor(server.ping),
+                      ),
+                    ),
+                    trailing: server.testing
+                        ? const SizedBox(
+                            width: 22,
+                            height: 22,
+                            child:
+                                CircularProgressIndicator(
+                              strokeWidth: 2,
+                            ),
+                          )
+                        : server.ping != null
+                            ? Icon(
+                                Icons.circle,
+                                size: 12,
+                                color: pingColor(
+                                  server.ping,
+                                ),
+                              )
+                            : const Icon(
+                                Icons.chevron_left,
+                              ),
+                  ),
+                );
+              },
+            ),
+          ],
         ),
-      ],
+      ),
     );
   }
 
   @override
   Widget build(BuildContext context) {
     return Directionality(
-      textDirection:
-          TextDirection.rtl,
+      textDirection: TextDirection.rtl,
       child: Scaffold(
-        body: SafeArea(
-          child: ListView(
-            padding:
-                const EdgeInsets.fromLTRB(
-              18,
-              18,
-              18,
-              35,
+        appBar: AppBar(
+          title: const Text(
+            'Light speed 🔥',
+            style: TextStyle(
+              fontWeight: FontWeight.bold,
             ),
-            children: [
-              buildHeader(),
-
-              const SizedBox(height: 22),
-
-              buildSubscriptionInput(),
-
-              const SizedBox(height: 12),
-
-              Container(
-                padding:
-                    const EdgeInsets.all(13),
-                decoration: BoxDecoration(
-                  color:
-                      const Color(0xFF111522),
-                  borderRadius:
-                      BorderRadius.circular(
-                          15),
-                ),
-                child: Row(
-                  children: [
-                    const Icon(
-                      Icons.info_outline_rounded,
-                      size: 18,
-                      color:
-                          Colors.white54,
-                    ),
-                    const SizedBox(width: 9),
-                    Expanded(
-                      child: Text(
-                        message,
-                        style:
-                            const TextStyle(
-                          color:
-                              Colors.white60,
-                          fontSize: 12,
-                        ),
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-
-              const SizedBox(height: 14),
-
-              buildConnection(),
-
-              const SizedBox(height: 14),
-
-              buildSubscriptionInfo(),
-
-              const SizedBox(height: 20),
-
-              if (configs.isNotEmpty)
-                SizedBox(
-                  height: 52,
-                  child: OutlinedButton.icon(
-                    onPressed: testing
-                        ? null
-                        : testAllServers,
-                    icon: testing
-                        ? const SizedBox(
-                            width: 20,
-                            height: 20,
-                            child:
-                                CircularProgressIndicator(
-                              strokeWidth: 2,
+          ),
+          centerTitle: true,
+        ),
+        body: SafeArea(
+          child: RefreshIndicator(
+            onRefresh: loadSubscription,
+            child: ListView(
+              padding: const EdgeInsets.all(14),
+              children: [
+                Card(
+                  child: Padding(
+                    padding: const EdgeInsets.all(16),
+                    child: Column(
+                      children: [
+                        TextField(
+                          controller: urlController,
+                          keyboardType:
+                              TextInputType.url,
+                          textDirection:
+                              TextDirection.ltr,
+                          decoration:
+                              InputDecoration(
+                            labelText:
+                                'لینک Subscription',
+                            hintText:
+                                'https://...',
+                            prefixIcon: const Icon(
+                              Icons.link,
                             ),
-                          )
-                        : const Icon(
-                            Icons.speed_rounded,
+                            suffixIcon: IconButton(
+                              onPressed: () {
+                                urlController.clear();
+                              },
+                              icon: const Icon(
+                                Icons.clear,
+                              ),
+                            ),
                           ),
-                    label: Text(
-                      testing
-                          ? 'در حال تست...'
-                          : 'تست سرعت همه سرورها',
-                    ),
-                    style:
-                        OutlinedButton.styleFrom(
-                      foregroundColor:
-                          const Color(
-                              0xFFB388FF),
-                      side: BorderSide(
-                        color: const Color(
-                          0xFF7C4DFF,
-                        ).withOpacity(0.5),
-                      ),
-                      shape:
-                          RoundedRectangleBorder(
-                        borderRadius:
-                            BorderRadius.circular(
-                                16),
-                      ),
+                        ),
+                        const SizedBox(height: 12),
+                        SizedBox(
+                          width: double.infinity,
+                          height: 50,
+                          child: FilledButton.icon(
+                            onPressed:
+                                loading
+                                    ? null
+                                    : loadSubscription,
+                            icon: loading
+                                ? const SizedBox(
+                                    width: 20,
+                                    height: 20,
+                                    child:
+                                        CircularProgressIndicator(
+                                      strokeWidth: 2,
+                                    ),
+                                  )
+                                : const Icon(
+                                    Icons.cloud_download,
+                                  ),
+                            label: Text(
+                              loading
+                                  ? 'در حال دریافت...'
+                                  : 'دریافت اشتراک',
+                            ),
+                          ),
+                        ),
+                      ],
                     ),
                   ),
                 ),
 
-              const SizedBox(height: 22),
+                const SizedBox(height: 12),
 
-              buildServers(),
-            ],
+                Container(
+                  padding: const EdgeInsets.all(14),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFF111322),
+                    borderRadius:
+                        BorderRadius.circular(16),
+                  ),
+                  child: Row(
+                    children: [
+                      Icon(
+                        isConnected
+                            ? Icons.check_circle
+                            : Icons.info_outline,
+                        color: isConnected
+                            ? Colors.greenAccent
+                            : Colors.deepPurpleAccent,
+                      ),
+                      const SizedBox(width: 10),
+                      Expanded(
+                        child: Text(message),
+                      ),
+                    ],
+                  ),
+                ),
+
+                const SizedBox(height: 12),
+
+                buildConnectionCard(),
+
+                const SizedBox(height: 12),
+
+                buildSubscriptionCard(),
+
+                const SizedBox(height: 12),
+
+                buildServerList(),
+
+                const SizedBox(height: 30),
+              ],
+            ),
           ),
         ),
       ),
