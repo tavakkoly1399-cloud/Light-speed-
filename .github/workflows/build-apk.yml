@@ -8,10 +8,12 @@ on:
 
 jobs:
   build:
+    name: Build Android APK
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout
+
+      - name: Checkout repository
         uses: actions/checkout@v4
 
       - name: Setup Flutter
@@ -19,20 +21,32 @@ jobs:
         with:
           channel: stable
 
-      - name: Create Android project files
-        run: flutter create --platforms=android .
+      - name: Create Flutter Android files
+        run: |
+          flutter create \
+            --platforms=android \
+            --project-name=light_speed \
+            .
+
+      - name: Remove default Flutter tests
+        run: |
+          rm -rf test
 
       - name: Install dependencies
-        run: flutter pub get
+        run: |
+          flutter pub get
 
-      - name: Analyze
-        run: flutter analyze
+      - name: Analyze project
+        run: |
+          flutter analyze
 
-      - name: Build APK
-        run: flutter build apk --release
+      - name: Build release APK
+        run: |
+          flutter build apk --release
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: light-speed-apk
+          name: Light-speed-APK
           path: build/app/outputs/flutter-apk/app-release.apk
+          if-no-files-found: error
