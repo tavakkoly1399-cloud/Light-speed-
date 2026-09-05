@@ -1,4 +1,3 @@
-import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
@@ -21,8 +20,8 @@ class LightSpeedApp extends StatelessWidget {
       title: 'Light speed 🔥',
       theme: ThemeData(
         brightness: Brightness.dark,
-        colorSchemeSeed: Colors.deepPurple,
         useMaterial3: true,
+        colorSchemeSeed: Colors.deepPurple,
       ),
       home: const HomePage(),
     );
@@ -53,13 +52,14 @@ class HomePage extends StatefulWidget {
 }
 
 class _HomePageState extends State<HomePage> {
-  final TextEditingController urlController = TextEditingController();
+  final urlController = TextEditingController();
 
   List<Config> configs = [];
+
   bool loading = false;
   bool testing = false;
 
-  String message = 'Subscription خودت را وارد کن';
+  String message = 'لینک Subscription را وارد کن';
 
   @override
   void initState() {
@@ -69,6 +69,7 @@ class _HomePageState extends State<HomePage> {
 
   Future<void> loadSavedUrl() async {
     final prefs = await SharedPreferences.getInstance();
+
     final saved = prefs.getString('subscription_url');
 
     if (saved != null) {
@@ -81,15 +82,15 @@ class _HomePageState extends State<HomePage> {
 
     if (url.isEmpty) {
       setState(() {
-        message = 'لینک Subscription را وارد کن';
+        message = 'لینک Subscription وارد نشده است';
       });
       return;
     }
 
     setState(() {
       loading = true;
-      message = 'در حال دریافت کانفیگ‌ها...';
       configs.clear();
+      message = 'در حال دریافت کانفیگ‌ها...';
     });
 
     try {
@@ -102,10 +103,15 @@ class _HomePageState extends State<HomePage> {
 
       if (response.statusCode < 200 ||
           response.statusCode >= 300) {
-        throw Exception('HTTP ${response.statusCode}');
+        throw Exception(
+          'HTTP ${response.statusCode}',
+        );
       }
 
-      final body = utf8.decode(response.bodyBytes);
+      final body = utf8.decode(
+        response.bodyBytes,
+        allowMalformed: true,
+      );
 
       final lines = decodeSubscription(body);
 
@@ -134,30 +140,32 @@ class _HomePageState extends State<HomePage> {
     } catch (e) {
       setState(() {
         loading = false;
-        message = 'خطا در دریافت Subscription';
+        message = 'دریافت Subscription ناموفق بود';
       });
     }
   }
 
   List<String> decodeSubscription(String body) {
-    final directLines = body
+    final direct = body
         .split(RegExp(r'\r?\n'))
         .map((e) => e.trim())
-        .where((e) => e.contains('://'))
+        .where(
+          (e) =>
+              e.isNotEmpty &&
+              e.contains('://'),
+        )
         .toList();
 
-    if (directLines.isNotEmpty) {
-      return directLines;
+    if (direct.isNotEmpty) {
+      return direct;
     }
 
     try {
-      var normalized = body.replaceAll(
-        RegExp(r'\s+'),
-        '',
-      );
+      var normalized =
+          body.replaceAll(RegExp(r'\s+'), '');
 
-      normalized += '=' *
-          ((4 - normalized.length % 4) % 4);
+      normalized +=
+          '=' * ((4 - normalized.length % 4) % 4);
 
       final decoded = utf8.decode(
         base64.decode(normalized),
@@ -167,7 +175,11 @@ class _HomePageState extends State<HomePage> {
       return decoded
           .split(RegExp(r'\r?\n'))
           .map((e) => e.trim())
-          .where((e) => e.contains('://'))
+          .where(
+            (e) =>
+                e.isNotEmpty &&
+                e.contains('://'),
+          )
           .toList();
     } catch (_) {
       return [];
@@ -206,7 +218,7 @@ class _HomePageState extends State<HomePage> {
     }
   }
 
-  Future<int?> pingHost(
+  Future<int?> testServer(
     String host,
     int port,
   ) async {
@@ -234,13 +246,15 @@ class _HomePageState extends State<HomePage> {
 
     setState(() {
       testing = true;
-      message = 'در حال تست سرورها...';
+      message = 'در حال بررسی سرورها...';
     });
 
     for (final config in configs) {
-      if (config.port == null) continue;
+      if (config.port == null) {
+        continue;
+      }
 
-      final result = await pingHost(
+      final result = await testServer(
         config.address,
         config.port!,
       );
@@ -276,28 +290,21 @@ class _HomePageState extends State<HomePage> {
     });
   }
 
-  String getBestServer() {
-    if (configs.isEmpty) {
-      return 'سروری وجود ندارد';
-    }
-
+  Config? getBestServer() {
     final valid = configs
-        .where((e) => e.ping != null)
+        .where((config) => config.ping != null)
         .toList();
 
     if (valid.isEmpty) {
-      return 'ابتدا تست Ping را اجرا کن';
+      return null;
     }
 
     valid.sort(
-      (a, b) => a.ping!.compareTo(
-        b.ping!,
-      ),
+      (a, b) =>
+          a.ping!.compareTo(b.ping!),
     );
 
-    final best = valid.first;
-
-    return '${best.address}:${best.port}';
+    return valid.first;
   }
 
   Future<void> copyConfig(Config config) async {
@@ -316,6 +323,8 @@ class _HomePageState extends State<HomePage> {
 
   @override
   Widget build(BuildContext context) {
+    final best = getBestServer();
+
     return Scaffold(
       appBar: AppBar(
         title: const Text(
@@ -349,10 +358,9 @@ class _HomePageState extends State<HomePage> {
                 children: [
                   Expanded(
                     child: FilledButton.icon(
-                      onPressed:
-                          loading
-                              ? null
-                              : loadSubscription,
+                      onPressed: loading
+                          ? null
+                          : loadSubscription,
                       icon: const Icon(
                         Icons.download,
                       ),
@@ -361,9 +369,7 @@ class _HomePageState extends State<HomePage> {
                       ),
                     ),
                   ),
-
                   const SizedBox(width: 8),
-
                   Expanded(
                     child: FilledButton.icon(
                       onPressed:
@@ -392,7 +398,7 @@ class _HomePageState extends State<HomePage> {
 
               const SizedBox(height: 8),
 
-              if (configs.isNotEmpty)
+              if (best != null)
                 Card(
                   child: ListTile(
                     leading: const Icon(
@@ -402,7 +408,8 @@ class _HomePageState extends State<HomePage> {
                       'بهترین سرور',
                     ),
                     subtitle: Text(
-                      getBestServer(),
+                      '${best.address}:${best.port}'
+                      '  •  ${best.ping} ms',
                     ),
                   ),
                 ),
@@ -426,20 +433,16 @@ class _HomePageState extends State<HomePage> {
 
                           return Card(
                             child: ListTile(
-                              leading: Icon(
-                                config.ping ==
-                                        null
-                                    ? Icons.cloud
-                                    : Icons
-                                        .flash_on,
+                              leading: const Icon(
+                                Icons.cloud,
                               ),
                               title: Text(
                                 '${config.type} ${index + 1}',
                               ),
                               subtitle: Text(
                                 '${config.address}:${config.port ?? '-'}'
-                                '\n'
-                                'Ping: ${config.ping == null ? '---' : '${config.ping} ms'}',
+                                '\nPing: '
+                                '${config.ping == null ? '---' : '${config.ping} ms'}',
                               ),
                               isThreeLine: true,
                               trailing:
