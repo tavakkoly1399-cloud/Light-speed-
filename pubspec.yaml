@@ -1,6 +1,7 @@
 name: light_speed
 description: Light speed 🔥 - Real VPN Client
 publish_to: "none"
+
 version: 1.0.0+1
 
 environment:
@@ -12,7 +13,7 @@ dependencies:
 
   http: ^1.2.2
   shared_preferences: ^2.3.2
-  flutter_vless: ^1.1.6
+  flutter_vless: ^1.1.5
 
 dev_dependencies:
   flutter_test:
