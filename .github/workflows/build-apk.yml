@@ -13,42 +13,21 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-
-      # --------------------------------------------------
-      # Checkout
-      # --------------------------------------------------
-
       - name: Checkout repository
         uses: actions/checkout@v4
-
-      # --------------------------------------------------
-      # Flutter
-      # --------------------------------------------------
 
       - name: Setup Flutter
         uses: subosito/flutter-action@v2
         with:
           channel: stable
 
-      # --------------------------------------------------
-      # Create Android project
-      # --------------------------------------------------
-
       - name: Create Android project
         run: |
           flutter create --platforms=android .
 
-      # --------------------------------------------------
-      # Remove default tests
-      # --------------------------------------------------
-
       - name: Remove default tests
         run: |
           rm -rf test
-
-      # --------------------------------------------------
-      # Create icon directory
-      # --------------------------------------------------
 
       - name: Check icon
         run: |
@@ -58,10 +37,6 @@ jobs:
             echo "ERROR: assets/icon/light_speed_icon.png not found"
             exit 1
           fi
-
-      # --------------------------------------------------
-      # Internet permission
-      # --------------------------------------------------
 
       - name: Configure Android permission
         run: |
@@ -88,41 +63,21 @@ jobs:
           path.write_text(text)
           PY
 
-      # --------------------------------------------------
-      # Dependencies
-      # --------------------------------------------------
-
       - name: Install dependencies
         run: |
           flutter pub get
-
-      # --------------------------------------------------
-      # Generate launcher icon
-      # --------------------------------------------------
 
       - name: Generate app icons
         run: |
           dart run flutter_launcher_icons
 
-      # --------------------------------------------------
-      # Analyze
-      # --------------------------------------------------
-
       - name: Analyze
         run: |
           flutter analyze
 
-      # --------------------------------------------------
-      # Build APK
-      # --------------------------------------------------
-
       - name: Build APK
         run: |
           flutter build apk --release
-
-      # --------------------------------------------------
-      # Upload APK
-      # --------------------------------------------------
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
