@@ -40,8 +40,21 @@ class Config {
     required this.type,
     required this.address,
     this.port,
-    this.ping,
   });
+}
+
+class SubscriptionInfo {
+  int? upload;
+  int? download;
+  int? total;
+  int? expire;
+
+  int get used => (upload ?? 0) + (download ?? 0);
+
+  int? get remaining {
+    if (total == null || total! <= 0) return null;
+    return total! - used < 0 ? 0 : total! - used;
+  }
 }
 
 class HomePage extends StatefulWidget {
@@ -55,6 +68,7 @@ class _HomePageState extends State<HomePage> {
   final urlController = TextEditingController();
 
   List<Config> configs = [];
+  SubscriptionInfo? subscriptionInfo;
 
   bool loading = false;
   bool testing = false;
@@ -69,13 +83,16 @@ class _HomePageState extends State<HomePage> {
 
   Future<void> loadSavedUrl() async {
     final prefs = await SharedPreferences.getInstance();
-
     final saved = prefs.getString('subscription_url');
 
-    if (saved != null) {
+    if (saved != null && saved.isNotEmpty) {
       urlController.text = saved;
     }
   }
+
+  // ==========================================================
+  // دریافت Subscription
+  // ==========================================================
 
   Future<void> loadSubscription() async {
     final url = urlController.text.trim();
@@ -87,18 +104,41 @@ class _HomePageState extends State<HomePage> {
       return;
     }
 
+    Uri uri;
+
+    try {
+      uri = Uri.parse(url);
+
+      if (!uri.hasScheme ||
+          (uri.scheme != 'http' && uri.scheme != 'https')) {
+        throw const FormatException(
+          'لینک باید با http یا https باشد',
+        );
+      }
+    } catch (e) {
+      setState(() {
+        message = 'لینک نامعتبر است: $e';
+      });
+      return;
+    }
+
     setState(() {
       loading = true;
       configs.clear();
-      message = 'در حال دریافت کانفیگ‌ها...';
+      subscriptionInfo = null;
+      message = 'در حال دریافت Subscription...';
     });
 
     try {
       final response = await http.get(
-        Uri.parse(url),
+        uri,
         headers: {
           'User-Agent': 'LightSpeed/1.0',
+          'Accept': '*/*',
+          'Cache-Control': 'no-cache',
         },
+      ).timeout(
+        const Duration(seconds: 20),
       );
 
       if (response.statusCode < 200 ||
@@ -108,6 +148,12 @@ class _HomePageState extends State<HomePage> {
         );
       }
 
+      // اطلاعات حجم و تاریخ از Header
+      final info = parseSubscriptionInfo(
+        response.headers,
+      );
+
+      // محتوای Subscription
       final body = utf8.decode(
         response.bodyBytes,
         allowMalformed: true,
@@ -132,65 +178,253 @@ class _HomePageState extends State<HomePage> {
         url,
       );
 
+      if (!mounted) return;
+
       setState(() {
         configs = result;
+        subscriptionInfo = info;
         loading = false;
-        message = '${configs.length} کانفیگ پیدا شد';
+
+        if (result.isEmpty) {
+          message =
+              'هیچ کانفیگی پیدا نشد. پاسخ سرور را بررسی کنید.';
+        } else {
+          message =
+              '${result.length} سرور پیدا شد';
+        }
       });
-    } catch (e) {
+    } on SocketException catch (e) {
+      if (!mounted) return;
+
       setState(() {
         loading = false;
-        message = 'دریافت Subscription ناموفق بود';
+        message =
+            'خطای اتصال: ${e.message}';
+      });
+    } on FormatException catch (e) {
+      if (!mounted) return;
+
+      setState(() {
+        loading = false;
+        message =
+            'خطای فرمت: ${e.message}';
+      });
+    } catch (e) {
+      if (!mounted) return;
+
+      setState(() {
+        loading = false;
+        message =
+            'خطا: ${e.toString()}';
       });
     }
   }
 
+  // ==========================================================
+  // Subscription-Userinfo
+  // ==========================================================
+
+  SubscriptionInfo? parseSubscriptionInfo(
+    Map<String, String> headers,
+  ) {
+    String? userInfo;
+
+    for (final entry in headers.entries) {
+      if (entry.key.toLowerCase() ==
+          'subscription-userinfo') {
+        userInfo = entry.value;
+        break;
+      }
+    }
+
+    if (userInfo == null ||
+        userInfo.trim().isEmpty) {
+      return null;
+    }
+
+    final info = SubscriptionInfo();
+
+    final parts = userInfo.split(';');
+
+    for (final part in parts) {
+      final item = part.trim();
+
+      if (!item.contains('=')) {
+        continue;
+      }
+
+      final index = item.indexOf('=');
+
+      final key = item
+          .substring(0, index)
+          .trim()
+          .toLowerCase();
+
+      final value = item
+          .substring(index + 1)
+          .trim();
+
+      final number = int.tryParse(value);
+
+      if (number == null) {
+        continue;
+      }
+
+      switch (key) {
+        case 'upload':
+          info.upload = number;
+          break;
+
+        case 'download':
+          info.download = number;
+          break;
+
+        case 'total':
+          info.total = number;
+          break;
+
+        case 'expire':
+          info.expire = number;
+          break;
+      }
+    }
+
+    return info;
+  }
+
+  // ==========================================================
+  // Decode Subscription
+  // ==========================================================
+
   List<String> decodeSubscription(String body) {
-    final direct = body
-        .split(RegExp(r'\r?\n'))
-        .map((e) => e.trim())
-        .where(
-          (e) =>
-              e.isNotEmpty &&
-              e.contains('://'),
-        )
-        .toList();
+    final cleaned = body
+        .replaceFirst('\uFEFF', '')
+        .trim();
+
+    if (cleaned.isEmpty) {
+      return [];
+    }
+
+    // اول: کانفیگ خام
+    final direct = extractConfigs(cleaned);
 
     if (direct.isNotEmpty) {
       return direct;
     }
 
+    // دوم: Base64
+    final decoded = decodeBase64(cleaned);
+
+    if (decoded != null) {
+      final result = extractConfigs(decoded);
+
+      if (result.isNotEmpty) {
+        return result;
+      }
+
+      // Base64 دوبل
+      final second = decodeBase64(decoded);
+
+      if (second != null) {
+        final secondResult =
+            extractConfigs(second);
+
+        if (secondResult.isNotEmpty) {
+          return secondResult;
+        }
+      }
+    }
+
+    return [];
+  }
+
+  // ==========================================================
+  // استخراج همه کانفیگ‌ها
+  // ==========================================================
+
+  List<String> extractConfigs(String text) {
+    final result = <String>[];
+
+    final lines =
+        text.split(RegExp(r'\r?\n'));
+
+    const prefixes = [
+      'vless://',
+      'vmess://',
+      'trojan://',
+      'ss://',
+      'ssr://',
+      'hysteria://',
+      'hysteria2://',
+      'hy2://',
+      'hy://',
+    ];
+
+    for (var line in lines) {
+      var value = line.trim();
+
+      if (value.isEmpty) continue;
+
+      value = value.replaceAll('"', '');
+      value = value.replaceAll("'", '');
+
+      final lower = value.toLowerCase();
+
+      for (final prefix in prefixes) {
+        if (lower.startsWith(prefix)) {
+          result.add(value);
+          break;
+        }
+      }
+    }
+
+    return result;
+  }
+
+  // ==========================================================
+  // Base64
+  // ==========================================================
+
+  String? decodeBase64(String input) {
     try {
-      var normalized =
-          body.replaceAll(RegExp(r'\s+'), '');
+      var value = input.trim();
 
-      normalized +=
-          '=' * ((4 - normalized.length % 4) % 4);
-
-      final decoded = utf8.decode(
-        base64.decode(normalized),
-        allowMalformed: true,
+      value = value.replaceAll(
+        RegExp(r'\s+'),
+        '',
       );
 
-      return decoded
-          .split(RegExp(r'\r?\n'))
-          .map((e) => e.trim())
-          .where(
-            (e) =>
-                e.isNotEmpty &&
-                e.contains('://'),
-          )
-          .toList();
+      // URL Safe Base64
+      value = value.replaceAll('-', '+');
+      value = value.replaceAll('_', '/');
+
+      final remainder = value.length % 4;
+
+      if (remainder != 0) {
+        value += '=' * (4 - remainder);
+      }
+
+      final bytes = base64.decode(value);
+
+      return utf8.decode(
+        bytes,
+        allowMalformed: true,
+      );
     } catch (_) {
-      return [];
+      return null;
     }
   }
+
+  // ==========================================================
+  // تشخیص کانفیگ
+  // ==========================================================
 
   Config? parseConfig(String value) {
     try {
       final uri = Uri.parse(value);
 
-      final scheme = uri.scheme.toLowerCase();
+      final scheme =
+          uri.scheme.toLowerCase();
 
       const supported = [
         'vless',
@@ -201,6 +435,7 @@ class _HomePageState extends State<HomePage> {
         'hysteria',
         'hysteria2',
         'hy2',
+        'hy',
       ];
 
       if (!supported.contains(scheme)) {
@@ -218,17 +453,25 @@ class _HomePageState extends State<HomePage> {
     }
   }
 
+  // ==========================================================
+  // Ping
+  // ==========================================================
+
   Future<int?> testServer(
     String host,
     int port,
   ) async {
     final stopwatch = Stopwatch()..start();
 
+    Socket? socket;
+
     try {
-      final socket = await Socket.connect(
+      socket = await Socket.connect(
         host,
         port,
-        timeout: const Duration(seconds: 3),
+        timeout: const Duration(
+          seconds: 3,
+        ),
       );
 
       stopwatch.stop();
@@ -237,24 +480,31 @@ class _HomePageState extends State<HomePage> {
 
       return stopwatch.elapsedMilliseconds;
     } catch (_) {
+      socket?.destroy();
       return null;
     }
   }
+
+  // ==========================================================
+  // تست همه سرورها
+  // ==========================================================
 
   Future<void> testAllServers() async {
     if (configs.isEmpty) return;
 
     setState(() {
       testing = true;
-      message = 'در حال بررسی سرورها...';
+      message =
+          'در حال تست همه سرورها...';
     });
 
     for (final config in configs) {
-      if (config.port == null) {
+      if (config.port == null ||
+          config.address.isEmpty) {
         continue;
       }
 
-      final result = await testServer(
+      final ping = await testServer(
         config.address,
         config.port!,
       );
@@ -262,64 +512,302 @@ class _HomePageState extends State<HomePage> {
       if (!mounted) return;
 
       setState(() {
-        config.ping = result;
+        config.ping = ping;
       });
     }
 
     configs.sort((a, b) {
-      if (a.ping == null && b.ping == null) {
+      if (a.ping == null &&
+          b.ping == null) {
         return 0;
       }
 
-      if (a.ping == null) {
-        return 1;
-      }
-
-      if (b.ping == null) {
-        return -1;
-      }
+      if (a.ping == null) return 1;
+      if (b.ping == null) return -1;
 
       return a.ping!.compareTo(
         b.ping!,
       );
     });
 
+    if (!mounted) return;
+
     setState(() {
       testing = false;
-      message = 'سرورها بر اساس Ping مرتب شدند';
+      message =
+          'تست تمام شد؛ سریع‌ترین سرور اول لیست است';
     });
   }
 
+  // ==========================================================
+  // سریع‌ترین
+  // ==========================================================
+
   Config? getBestServer() {
     final valid = configs
-        .where((config) => config.ping != null)
+        .where(
+          (e) => e.ping != null,
+        )
         .toList();
 
-    if (valid.isEmpty) {
-      return null;
-    }
+    if (valid.isEmpty) return null;
 
     valid.sort(
       (a, b) =>
-          a.ping!.compareTo(b.ping!),
+          a.ping!.compareTo(
+            b.ping!,
+          ),
     );
 
     return valid.first;
   }
 
-  Future<void> copyConfig(Config config) async {
+  // ==========================================================
+  // حجم
+  // ==========================================================
+
+  String formatBytes(int? bytes) {
+    if (bytes == null) {
+      return 'نامشخص';
+    }
+
+    if (bytes < 1024) {
+      return '$bytes B';
+    }
+
+    if (bytes <
+        1024 * 1024) {
+      return '${(bytes / 1024).toStringAsFixed(1)} KB';
+    }
+
+    if (bytes <
+        1024 * 1024 * 1024) {
+      return '${(bytes / (1024 * 1024)).toStringAsFixed(2)} MB';
+    }
+
+    if (bytes <
+        1024 *
+            1024 *
+            1024 *
+            1024) {
+      return '${(bytes / (1024 * 1024 * 1024)).toStringAsFixed(2)} GB';
+    }
+
+    return '${(bytes / (1024 * 1024 * 1024 * 1024)).toStringAsFixed(2)} TB';
+  }
+
+  // ==========================================================
+  // تاریخ
+  // ==========================================================
+
+  String formatExpire(int? expire) {
+    if (expire == null ||
+        expire <= 0) {
+      return 'نامشخص';
+    }
+
+    final date =
+        DateTime.fromMillisecondsSinceEpoch(
+      expire * 1000,
+    ).toLocal();
+
+    return '${date.year}/'
+        '${date.month.toString().padLeft(2, '0')}/'
+        '${date.day.toString().padLeft(2, '0')} '
+        '${date.hour.toString().padLeft(2, '0')}:'
+        '${date.minute.toString().padLeft(2, '0')}';
+  }
+
+  String remainingDays(int? expire) {
+    if (expire == null ||
+        expire <= 0) {
+      return 'نامشخص';
+    }
+
+    final date =
+        DateTime.fromMillisecondsSinceEpoch(
+      expire * 1000,
+    );
+
+    final days =
+        date.difference(DateTime.now()).inDays;
+
+    if (days < 0) {
+      return 'منقضی شده';
+    }
+
+    return '$days روز';
+  }
+
+  // ==========================================================
+  // کارت اطلاعات اشتراک
+  // ==========================================================
+
+  Widget buildSubscriptionCard() {
+    final info = subscriptionInfo;
+
+    if (info == null) {
+      return const SizedBox.shrink();
+    }
+
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(14),
+        child: Column(
+          crossAxisAlignment:
+              CrossAxisAlignment.stretch,
+          children: [
+            const Row(
+              children: [
+                Icon(
+                  Icons.account_balance_wallet,
+                ),
+                SizedBox(width: 8),
+                Text(
+                  '📊 اطلاعات اشتراک',
+                  style: TextStyle(
+                    fontSize: 18,
+                    fontWeight:
+                        FontWeight.bold,
+                  ),
+                ),
+              ],
+            ),
+
+            const SizedBox(height: 10),
+
+            if (info.total != null)
+              infoRow(
+                'حجم کل',
+                formatBytes(
+                  info.total,
+                ),
+                Icons.storage,
+              ),
+
+            infoRow(
+              'مصرف‌شده',
+              formatBytes(
+                info.used,
+              ),
+              Icons.data_usage,
+            ),
+
+            if (info.remaining != null)
+              infoRow(
+                'باقی‌مانده',
+                formatBytes(
+                  info.remaining,
+                ),
+                Icons.data_saver_on,
+              ),
+
+            if (info.upload != null)
+              infoRow(
+                'آپلود',
+                formatBytes(
+                  info.upload,
+                ),
+                Icons.upload,
+              ),
+
+            if (info.download != null)
+              infoRow(
+                'دانلود',
+                formatBytes(
+                  info.download,
+                ),
+                Icons.download,
+              ),
+
+            if (info.expire != null)
+              infoRow(
+                'تاریخ انقضا',
+                formatExpire(
+                  info.expire,
+                ),
+                Icons.event,
+              ),
+
+            if (info.expire != null)
+              infoRow(
+                'زمان باقی‌مانده',
+                remainingDays(
+                  info.expire,
+                ),
+                Icons.timer,
+              ),
+
+            infoRow(
+              'تعداد سرورها',
+              '${configs.length}',
+              Icons.cloud,
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget infoRow(
+    String title,
+    String value,
+    IconData icon,
+  ) {
+    return Padding(
+      padding:
+          const EdgeInsets.symmetric(
+        vertical: 5,
+      ),
+      child: Row(
+        children: [
+          Icon(
+            icon,
+            size: 19,
+          ),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Text(title),
+          ),
+          Text(
+            value,
+            style: const TextStyle(
+              fontWeight:
+                  FontWeight.bold,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  // ==========================================================
+  // Copy
+  // ==========================================================
+
+  Future<void> copyConfig(
+    Config config,
+  ) async {
     await Clipboard.setData(
-      ClipboardData(text: config.raw),
+      ClipboardData(
+        text: config.raw,
+      ),
     );
 
     if (!mounted) return;
 
-    ScaffoldMessenger.of(context).showSnackBar(
+    ScaffoldMessenger.of(context)
+        .showSnackBar(
       const SnackBar(
-        content: Text('کانفیگ کپی شد'),
+        content:
+            Text('کانفیگ کپی شد'),
       ),
     );
   }
+
+  // ==========================================================
+  // UI
+  // ==========================================================
 
   @override
   Widget build(BuildContext context) {
@@ -330,23 +818,33 @@ class _HomePageState extends State<HomePage> {
         title: const Text(
           'Light speed 🔥',
           style: TextStyle(
-            fontWeight: FontWeight.bold,
+            fontWeight:
+                FontWeight.bold,
           ),
         ),
         centerTitle: true,
       ),
+
       body: SafeArea(
         child: Padding(
-          padding: const EdgeInsets.all(16),
+          padding:
+              const EdgeInsets.all(16),
+
           child: Column(
             children: [
               TextField(
-                controller: urlController,
-                decoration: const InputDecoration(
-                  labelText: 'Subscription URL',
-                  hintText: 'https://...',
-                  border: OutlineInputBorder(),
-                  prefixIcon: Icon(Icons.link),
+                controller:
+                    urlController,
+                decoration:
+                    const InputDecoration(
+                  labelText:
+                      'Subscription URL',
+                  hintText:
+                      'https://...',
+                  border:
+                      OutlineInputBorder(),
+                  prefixIcon:
+                      Icon(Icons.link),
                 ),
                 keyboardType:
                     TextInputType.url,
@@ -357,30 +855,49 @@ class _HomePageState extends State<HomePage> {
               Row(
                 children: [
                   Expanded(
-                    child: FilledButton.icon(
-                      onPressed: loading
-                          ? null
-                          : loadSubscription,
-                      icon: const Icon(
-                        Icons.download,
-                      ),
-                      label: const Text(
+                    child:
+                        FilledButton.icon(
+                      onPressed:
+                          loading
+                              ? null
+                              : loadSubscription,
+                      icon:
+                          loading
+                              ? const SizedBox(
+                                  width: 18,
+                                  height: 18,
+                                  child:
+                                      CircularProgressIndicator(
+                                    strokeWidth:
+                                        2,
+                                  ),
+                                )
+                              : const Icon(
+                                  Icons.download,
+                                ),
+                      label:
+                          const Text(
                         'دریافت',
                       ),
                     ),
                   ),
+
                   const SizedBox(width: 8),
+
                   Expanded(
-                    child: FilledButton.icon(
+                    child:
+                        FilledButton.icon(
                       onPressed:
                           configs.isEmpty ||
                                   testing
                               ? null
                               : testAllServers,
-                      icon: const Icon(
+                      icon:
+                          const Icon(
                         Icons.speed,
                       ),
-                      label: const Text(
+                      label:
+                          const Text(
                         'تست Ping',
                       ),
                     ),
@@ -388,39 +905,53 @@ class _HomePageState extends State<HomePage> {
                 ],
               ),
 
-              const SizedBox(height: 12),
+              const SizedBox(height: 10),
 
               Align(
                 alignment:
                     Alignment.centerRight,
-                child: Text(message),
+                child: Text(
+                  message,
+                ),
               ),
 
               const SizedBox(height: 8),
 
+              // اطلاعات حجم و تاریخ
+              buildSubscriptionCard(),
+
+              // سریع‌ترین سرور
               if (best != null)
                 Card(
                   child: ListTile(
-                    leading: const Icon(
+                    leading:
+                        const Icon(
                       Icons.flash_on,
                     ),
-                    title: const Text(
-                      'بهترین سرور',
+                    title:
+                        const Text(
+                      '⚡ سریع‌ترین سرور',
+                      style: TextStyle(
+                        fontWeight:
+                            FontWeight.bold,
+                      ),
                     ),
-                    subtitle: Text(
+                    subtitle:
+                        Text(
                       '${best.address}:${best.port}'
-                      '  •  ${best.ping} ms',
+                      ' • ${best.ping} ms',
                     ),
                   ),
                 ),
 
               const SizedBox(height: 8),
 
+              // لیست همه سرورها
               Expanded(
                 child: configs.isEmpty
                     ? const Center(
                         child: Text(
-                          'هنوز کانفیگی دریافت نشده',
+                          'هنوز سروری دریافت نشده',
                         ),
                       )
                     : ListView.builder(
@@ -431,28 +962,62 @@ class _HomePageState extends State<HomePage> {
                           final config =
                               configs[index];
 
+                          final isBest =
+                              best == config;
+
                           return Card(
-                            child: ListTile(
-                              leading: const Icon(
-                                Icons.cloud,
+                            child:
+                                ListTile(
+                              leading:
+                                  Icon(
+                                isBest
+                                    ? Icons
+                                        .flash_on
+                                    : Icons
+                                        .cloud,
                               ),
-                              title: Text(
-                                '${config.type} ${index + 1}',
+
+                              title:
+                                  Row(
+                                children: [
+                                  Expanded(
+                                    child:
+                                        Text(
+                                      '${config.type} ${index + 1}',
+                                    ),
+                                  ),
+
+                                  if (isBest)
+                                    const Text(
+                                      '⚡',
+                                      style:
+                                          TextStyle(
+                                        fontSize:
+                                            20,
+                                      ),
+                                    ),
+                                ],
                               ),
-                              subtitle: Text(
+
+                              subtitle:
+                                  Text(
                                 '${config.address}:${config.port ?? '-'}'
                                 '\nPing: '
                                 '${config.ping == null ? '---' : '${config.ping} ms'}',
                               ),
-                              isThreeLine: true,
+
+                              isThreeLine:
+                                  true,
+
                               trailing:
                                   IconButton(
                                 icon:
                                     const Icon(
                                   Icons.copy,
                                 ),
-                                onPressed: () =>
-                                    copyConfig(
+                                onPressed:
+                                    () =>
+                                        copyConfig(
                                   config,
                                 ),
                               ),
