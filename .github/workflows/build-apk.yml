@@ -2,7 +2,6 @@ name: Build Light speed APK
 
 on:
   workflow_dispatch:
-
   push:
     branches:
       - main
@@ -13,7 +12,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout repository
+      - name: Checkout
         uses: actions/checkout@v4
 
       - name: Setup Flutter
@@ -22,62 +21,19 @@ jobs:
           channel: stable
 
       - name: Create Android project
-        run: |
-          flutter create --platforms=android .
+        run: flutter create --platforms=android .
 
-      - name: Remove default tests
-        run: |
-          rm -rf test
+      - name: Get packages
+        run: flutter pub get
 
-      - name: Check icon
-        run: |
-          mkdir -p assets/icon
-
-          if [ ! -f assets/icon/light_speed_icon.png ]; then
-            echo "ERROR: assets/icon/light_speed_icon.png not found"
-            exit 1
-          fi
-
-      - name: Configure Android permission
-        run: |
-          python3 - <<'PY'
-          from pathlib import Path
-
-          path = Path("android/app/src/main/AndroidManifest.xml")
-
-          text = path.read_text()
-
-          permission = '<uses-permission android:name="android.permission.INTERNET"/>'
-
-          if permission not in text:
-              text = text.replace(
-                  '<manifest xmlns:android="http://schemas.android.com/apk/res/android">',
-                  '<manifest xmlns:android="http://schemas.android.com/apk/res/android">\n    ' + permission
-              )
-
-          text = text.replace(
-              'android:label="light_speed"',
-              'android:label="Light speed 🔥"'
-          )
-
-          path.write_text(text)
-          PY
-
-      - name: Install dependencies
-        run: |
-          flutter pub get
-
-      - name: Generate app icons
-        run: |
-          dart run flutter_launcher_icons
+      - name: Generate icons
+        run: dart run flutter_launcher_icons
 
       - name: Analyze
-        run: |
-          flutter analyze
+        run: flutter analyze
 
       - name: Build APK
-        run: |
-          flutter build apk --release
+        run: flutter build apk --release
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
