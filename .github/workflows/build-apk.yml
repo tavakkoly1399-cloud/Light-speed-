@@ -52,12 +52,12 @@ jobs:
 
               s = s.replace(
                   "compileSdk = flutter.compileSdkVersion",
-                  "compileSdk = 35"
+                  "compileSdk = 36"
               )
 
               s = s.replace(
                   "compileSdkVersion flutter.compileSdkVersion",
-                  "compileSdkVersion 35"
+                  "compileSdkVersion 36"
               )
 
               p.write_text(s)
