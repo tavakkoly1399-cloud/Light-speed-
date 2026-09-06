@@ -13,7 +13,9 @@ final vpn = SingboxClient();
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
 
-  await vpn.initialize();
+  try {
+    await vpn.initialize();
+  } catch (_) {}
 
   runApp(const LightSpeedApp());
 }
@@ -33,6 +35,14 @@ class LightSpeedApp extends StatelessWidget {
         colorScheme: ColorScheme.fromSeed(
           seedColor: const Color(0xFF00E5FF),
           brightness: Brightness.dark,
+        ),
+        inputDecorationTheme: InputDecorationTheme(
+          filled: true,
+          fillColor: const Color(0xFF0D1728),
+          border: OutlineInputBorder(
+            borderRadius: BorderRadius.circular(16),
+            borderSide: BorderSide.none,
+          ),
         ),
       ),
       home: const HomePage(),
@@ -68,28 +78,28 @@ class HomePage extends StatefulWidget {
 }
 
 class _HomePageState extends State<HomePage> {
-  final url = TextEditingController();
+  final TextEditingController url = TextEditingController();
 
-  final servers = <Server>[];
+  final List<Server> servers = [];
 
   StreamSubscription? stateSub;
   StreamSubscription? trafficSub;
-  StreamSubscription? faultSub;
 
-  Timer? timer;
+  Timer? refreshTimer;
+  Timer? durationTimer;
 
   int page = 0;
 
   bool loading = false;
   bool testing = false;
-  bool connected = false;
   bool connecting = false;
+  bool connected = false;
+  bool speedTesting = false;
 
   String stateText = 'آماده اتصال';
-  String vpnError = '';
 
-  String download = '0 Mbps';
-  String upload = '0 Mbps';
+  double downloadBps = 0;
+  double uploadBps = 0;
 
   int downloadTotalBytes = 0;
   int uploadTotalBytes = 0;
@@ -98,82 +108,26 @@ class _HomePageState extends State<HomePage> {
   int? usedBytes;
   int? expireAt;
 
+  DateTime? connectedAt;
+  Duration connectionDuration = Duration.zero;
+
+  double speedTestDownload = 0;
+  double speedTestUpload = 0;
+
+  final List<double> downloadHistory = [];
+  final List<double> uploadHistory = [];
+
   @override
   void initState() {
     super.initState();
 
-    stateSub = vpn.serviceStateStream.listen((s) {
-      if (!mounted) return;
+    _listenVpnState();
+    _listenTraffic();
 
-      final text = s.toString();
-      final low = text.toLowerCase();
-
-      setState(() {
-        stateText = text;
-
-        if (low.contains('running') ||
-            low.contains('connected') ||
-            low.contains('started')) {
-          connected = true;
-          connecting = false;
-        }
-
-        if (low.contains('stopped') ||
-            low.contains('disconnected')) {
-          connected = false;
-          connecting = false;
-        }
-      });
-    });
-
-    trafficSub = vpn.trafficStatsStream.listen((s) {
-      if (!mounted) return;
-
-      final dynamic x = s;
-
-      try {
-        setState(() {
-          download = speed(x.downlinkBps);
-          upload = speed(x.uplinkBps);
-
-          try {
-            final dynamic d = x.downlinkTotalBytes;
-
-            if (d is num) {
-              downloadTotalBytes = d.toInt();
-            }
-          } catch (_) {}
-
-          try {
-            final dynamic u = x.uplinkTotalBytes;
-
-            if (u is num) {
-              uploadTotalBytes = u.toInt();
-            }
-          } catch (_) {}
-        });
-      } catch (_) {}
-    });
-
-    faultSub = vpn.faultStream.listen((fault) {
-      if (!mounted) return;
-
-      final error = fault.toString();
-
-      setState(() {
-        connected = false;
-        connecting = false;
-        stateText = 'خطای VPN';
-        vpnError = error;
-      });
-
-      snack('VPN: $error');
-    });
-
-    timer = Timer.periodic(
+    refreshTimer = Timer.periodic(
       const Duration(minutes: 15),
       (_) {
-        if (!connected && !connecting) {
+        if (!connected) {
           loadSubscription(silent: true);
         }
       },
@@ -182,92 +136,165 @@ class _HomePageState extends State<HomePage> {
     loadSaved();
   }
 
-  Future<void> loadSaved() async {
-    try {
-      final p = await SharedPreferences.getInstance();
+  void _listenVpnState() {
+    stateSub = vpn.serviceStateStream.listen((s) {
+      if (!mounted) return;
 
-      final saved = p.getString('subscription_url');
+      final text = s.toString();
+      final low = text.toLowerCase();
 
-      if (saved == null || saved.isEmpty) {
-        return;
+      if (low.contains('running') || low.contains('connected')) {
+        if (!connected) {
+          setState(() {
+            connected = true;
+            stateText = 'متصل';
+            connectedAt ??= DateTime.now();
+          });
+
+          _startDurationTimer();
+        }
       }
 
-      url.text = saved;
+      if (low.contains('stopped') ||
+          low.contains('disconnected') ||
+          low.contains('idle')) {
+        if (connected) {
+          setState(() {
+            connected = false;
+            stateText = 'قطع شد';
+          });
+        }
 
-      await loadSubscription(silent: true);
-    } catch (_) {}
+        durationTimer?.cancel();
+      }
+    });
+  }
+
+  void _listenTraffic() {
+    trafficSub = vpn.trafficStatsStream.listen((stats) {
+      if (!mounted) return;
+
+      try {
+        final dynamic s = stats;
+
+        final dynamic down = s.downlinkBps;
+        final dynamic up = s.uplinkBps;
+        final dynamic downTotal = s.downlinkTotalBytes;
+        final dynamic upTotal = s.uplinkTotalBytes;
+
+        final double d =
+            down is num ? down.toDouble() : 0.0;
+
+        final double u =
+            up is num ? up.toDouble() : 0.0;
+
+        final int dt =
+            downTotal is num ? downTotal.toInt() : downloadTotalBytes;
+
+        final int ut =
+            upTotal is num ? upTotal.toInt() : uploadTotalBytes;
+
+        setState(() {
+          downloadBps = max(0, d);
+          uploadBps = max(0, u);
+
+          downloadTotalBytes = max(0, dt);
+          uploadTotalBytes = max(0, ut);
+
+          _pushHistory(downloadHistory, downloadBps);
+          _pushHistory(uploadHistory, uploadBps);
+        });
+      } catch (_) {}
+    });
+  }
+
+  void _pushHistory(List<double> list, double value) {
+    list.add(value);
+
+    if (list.length > 30) {
+      list.removeAt(0);
+    }
+  }
+
+  Future<void> loadSaved() async {
+    final prefs = await SharedPreferences.getInstance();
+
+    final saved = prefs.getString('subscription_url');
+
+    if (saved == null || saved.isEmpty) {
+      return;
+    }
+
+    url.text = saved;
+
+    await loadSubscription(silent: true);
   }
 
   Future<void> loadSubscription({
     bool silent = false,
   }) async {
-    if (url.text.trim().isEmpty) {
+    final address = url.text.trim();
+
+    if (address.isEmpty) {
       if (!silent && mounted) {
         setState(() {
           stateText = 'Subscription URL را وارد کن';
         });
       }
-
       return;
     }
 
-    if (mounted) {
+    if (!silent && mounted) {
       setState(() {
         loading = true;
-
-        if (!silent) {
-          stateText = 'در حال دریافت سرورها...';
-        }
+        stateText = 'در حال دریافت Subscription...';
       });
+    } else {
+      loading = true;
     }
 
     try {
-      final r = await http
-          .get(
-            Uri.parse(url.text.trim()),
-            headers: const {
-              'User-Agent': 'LightSpeed/2.0',
-              'Accept': '*/*',
-            },
-          )
-          .timeout(
-            const Duration(seconds: 20),
-          );
+      final response = await http.get(
+        Uri.parse(address),
+        headers: const {
+          'User-Agent': 'LightSpeed/3.0',
+          'Accept': '*/*',
+        },
+      ).timeout(
+        const Duration(seconds: 20),
+      );
 
-      if (r.statusCode < 200 || r.statusCode >= 300) {
-        throw Exception('HTTP ${r.statusCode}');
+      if (response.statusCode < 200 ||
+          response.statusCode >= 300) {
+        throw Exception(
+          'HTTP ${response.statusCode}',
+        );
       }
 
       final body = utf8.decode(
-        r.bodyBytes,
+        response.bodyBytes,
         allowMalformed: true,
       );
 
       _readUserInfo(
-        r.headers['subscription-userinfo'],
+        response.headers['subscription-userinfo'],
       );
 
-      final result = <Server>[];
+      final List<Server> result = [];
 
       for (final line in decodeSubscription(body)) {
-        final s = parseServer(line);
+        final server = parseServer(line);
 
-        if (s != null) {
-          result.add(s);
+        if (server != null) {
+          result.add(server);
         }
       }
 
-      if (result.isEmpty) {
-        throw Exception(
-          'هیچ کانفیگ معتبری در Subscription پیدا نشد',
-        );
-      }
+      final prefs = await SharedPreferences.getInstance();
 
-      final p = await SharedPreferences.getInstance();
-
-      await p.setString(
+      await prefs.setString(
         'subscription_url',
-        url.text.trim(),
+        address,
       );
 
       if (!mounted) return;
@@ -279,10 +306,14 @@ class _HomePageState extends State<HomePage> {
 
         loading = false;
 
-        stateText = '${servers.length} سرور دریافت شد';
+        stateText = result.isEmpty
+            ? 'هیچ سروری پیدا نشد'
+            : '${result.length} سرور دریافت شد';
       });
 
-      await testAll(silent: true);
+      if (result.isNotEmpty) {
+        await testAll(silent: true);
+      }
     } catch (e) {
       if (!mounted) return;
 
@@ -293,7 +324,7 @@ class _HomePageState extends State<HomePage> {
 
       if (!silent) {
         snack(
-          'دریافت Subscription ناموفق بود\n$e',
+          'دریافت Subscription ناموفق بود',
         );
       }
     }
@@ -304,45 +335,37 @@ class _HomePageState extends State<HomePage> {
       return;
     }
 
-    final m = <String, int>{};
+    final values = <String, int>{};
 
-    for (final x in raw.split(';')) {
-      final p = x.trim().split('=');
+    for (final item in raw.split(';')) {
+      final parts = item.trim().split('=');
 
-      if (p.length == 2) {
-        final key = p[0].trim();
+      if (parts.length == 2) {
+        final value = int.tryParse(parts[1]);
 
-        final value = int.tryParse(
-              p[1].trim(),
-            ) ??
-            0;
-
-        m[key] = value;
+        if (value != null) {
+          values[parts[0]] = value;
+        }
       }
     }
+
+    final upload = values['upload'] ?? 0;
+    final download = values['download'] ?? 0;
 
     if (!mounted) return;
 
     setState(() {
-      totalBytes = m['total'];
-
-      usedBytes =
-          (m['upload'] ?? 0) +
-          (m['download'] ?? 0);
-
-      expireAt = m['expire'];
+      totalBytes = values['total'];
+      usedBytes = upload + download;
+      expireAt = values['expire'];
     });
   }
 
   List<String> decodeSubscription(String body) {
     final direct = body
         .split(RegExp(r'\r?\n'))
-        .map((x) => x.trim())
-        .where(
-          (x) =>
-              x.contains('://') &&
-              !x.startsWith('#'),
-        )
+        .map((e) => e.trim())
+        .where((e) => e.contains('://'))
         .toList();
 
     if (direct.isNotEmpty) {
@@ -350,33 +373,29 @@ class _HomePageState extends State<HomePage> {
     }
 
     try {
-      var b = body.trim();
+      var encoded = body.trim();
 
-      b = b.replaceAll(
+      encoded = encoded.replaceAll(
         RegExp(r'\s+'),
         '',
       );
 
-      b = b
+      encoded = encoded
           .replaceAll('-', '+')
           .replaceAll('_', '/');
 
-      b += '=' *
-          ((4 - b.length % 4) % 4);
+      encoded += '=' *
+          ((4 - encoded.length % 4) % 4);
 
       final decoded = utf8.decode(
-        base64.decode(b),
+        base64.decode(encoded),
         allowMalformed: true,
       );
 
       return decoded
           .split(RegExp(r'\r?\n'))
-          .map((x) => x.trim())
-          .where(
-            (x) =>
-                x.contains('://') &&
-                !x.startsWith('#'),
-          )
+          .map((e) => e.trim())
+          .where((e) => e.contains('://'))
           .toList();
     } catch (_) {
       return [];
@@ -385,47 +404,49 @@ class _HomePageState extends State<HomePage> {
 
   Server? parseServer(String raw) {
     try {
-      final u = Uri.parse(raw);
+      final uri = Uri.parse(raw);
 
-      final scheme = u.scheme.toLowerCase();
+      final scheme = uri.scheme.toLowerCase();
 
       if (scheme == 'vmess') {
         return parseVmess(raw);
       }
 
-      if (![
+      const supported = [
         'vless',
         'trojan',
         'ss',
         'hysteria2',
         'hy2',
-      ].contains(scheme)) {
+      ];
+
+      if (!supported.contains(scheme)) {
         return null;
       }
 
-      if (u.host.isEmpty || !u.hasPort) {
+      if (uri.host.isEmpty || !uri.hasPort) {
         return null;
       }
 
       final name = Uri.decodeComponent(
-        u.fragment.isEmpty
-            ? '${scheme.toUpperCase()} ${u.host}'
-            : u.fragment,
+        uri.fragment.isEmpty
+            ? '${scheme.toUpperCase()} ${uri.host}'
+            : uri.fragment,
       );
 
-      late Map<String, dynamic> out;
+      late Map<String, dynamic> outbound;
 
       if (scheme == 'vless') {
-        out = vless(u);
+        outbound = vless(uri);
       } else if (scheme == 'trojan') {
-        out = trojan(u);
+        outbound = trojan(uri);
       } else if (scheme == 'ss') {
-        out = shadowsocks(u, raw) ?? {};
+        outbound = shadowsocks(uri, raw) ?? {};
       } else {
-        out = hysteria2(u);
+        outbound = hysteria2(uri);
       }
 
-      if (out.isEmpty) {
+      if (outbound.isEmpty) {
         return null;
       }
 
@@ -433,9 +454,9 @@ class _HomePageState extends State<HomePage> {
         raw: raw,
         name: name,
         type: scheme.toUpperCase(),
-        host: u.host,
-        port: u.port,
-        outbound: out,
+        host: uri.host,
+        port: uri.port,
+        outbound: outbound,
       );
     } catch (_) {
       return null;
@@ -444,197 +465,198 @@ class _HomePageState extends State<HomePage> {
 
   Server? parseVmess(String raw) {
     try {
-      var b = raw.substring(
+      var encoded = raw.substring(
         raw.indexOf('://') + 3,
       );
 
-      b = b
+      encoded = encoded
           .replaceAll('-', '+')
           .replaceAll('_', '/');
 
-      b += '=' *
-          ((4 - b.length % 4) % 4);
+      encoded += '=' *
+          ((4 - encoded.length % 4) % 4);
 
       final decoded = utf8.decode(
-        base64.decode(b),
+        base64.decode(encoded),
         allowMalformed: true,
       );
 
-      final m =
-          json.decode(decoded)
-              as Map<String, dynamic>;
+      final map =
+          json.decode(decoded) as Map<String, dynamic>;
 
-      final host = '${m['add'] ?? ''}';
+      final host = '${map['add'] ?? ''}';
 
       final port =
-          int.tryParse(
-            '${m['port'] ?? ''}',
-          ) ??
-          0;
+          int.tryParse('${map['port'] ?? ''}') ?? 0;
 
-      final uuid = '${m['id'] ?? ''}';
+      final uuid = '${map['id'] ?? ''}';
 
       if (host.isEmpty ||
-          port == 0 ||
+          port <= 0 ||
           uuid.isEmpty) {
         return null;
       }
 
-      final out = <String, dynamic>{
+      final outbound = <String, dynamic>{
         'type': 'vmess',
         'tag': 'proxy',
         'server': host,
         'server_port': port,
         'uuid': uuid,
-        'security': '${m['scy'] ?? 'auto'}',
+        'security': '${map['scy'] ?? 'auto'}',
       };
 
-      final tls =
-          '${m['tls'] ?? ''}';
+      final tlsValue = '${map['tls'] ?? ''}';
 
       final sni =
-          '${m['sni'] ?? m['host'] ?? ''}';
+          '${map['sni'] ?? map['host'] ?? ''}';
 
-      if (tls.isNotEmpty && tls != 'none') {
-        out['tls'] = {
+      if (tlsValue.isNotEmpty &&
+          tlsValue != 'none') {
+        outbound['tls'] = {
           'enabled': true,
-          if (sni.isNotEmpty)
-            'server_name': sni,
+          if (sni.isNotEmpty) 'server_name': sni,
         };
       }
 
       addTransport(
-        out,
-        '${m['net'] ?? 'tcp'}',
-        '${m['path'] ?? ''}',
-        '${m['host'] ?? ''}',
+        outbound,
+        '${map['net'] ?? 'tcp'}',
+        '${map['path'] ?? ''}',
+        '${map['host'] ?? ''}',
       );
 
       return Server(
         raw: raw,
-        name: m['ps'] ?? 'VMess',
+        name: map['ps'] ?? 'VMess',
         type: 'VMESS',
         host: host,
         port: port,
-        outbound: out,
+        outbound: outbound,
       );
     } catch (_) {
       return null;
     }
   }
 
-  Map<String, dynamic> vless(Uri u) {
-    final p = u.queryParameters;
+  Map<String, dynamic> vless(Uri uri) {
+    final params = uri.queryParameters;
 
-    final out = <String, dynamic>{
+    final outbound = <String, dynamic>{
       'type': 'vless',
       'tag': 'proxy',
-      'server': u.host,
-      'server_port': u.port,
-      'uuid': u.userInfo,
+      'server': uri.host,
+      'server_port': uri.port,
+      'uuid': uri.userInfo,
     };
 
-    if ((p['flow'] ?? '').isNotEmpty) {
-      out['flow'] = p['flow'];
+    final flow = params['flow'] ?? '';
+
+    if (flow.isNotEmpty) {
+      outbound['flow'] = flow;
     }
 
-    final sec =
-        (p['security'] ?? '').toLowerCase();
+    final security =
+        (params['security'] ?? '').toLowerCase();
 
-    if (sec == 'tls' ||
-        sec == 'reality') {
+    if (security == 'tls' ||
+        security == 'reality') {
       final tls = <String, dynamic>{
         'enabled': true,
         'server_name':
-            p['sni'] ??
-            p['host'] ??
-            u.host,
+            params['sni'] ??
+            params['host'] ??
+            uri.host,
       };
 
-      if ((p['fp'] ?? '').isNotEmpty) {
+      final fingerprint = params['fp'] ?? '';
+
+      if (fingerprint.isNotEmpty) {
         tls['utls'] = {
           'enabled': true,
-          'fingerprint': p['fp'],
+          'fingerprint': fingerprint,
         };
       }
 
-      if (sec == 'reality' &&
-          (p['pbk'] ?? '').isNotEmpty) {
-        tls['reality'] = {
-          'enabled': true,
-          'public_key': p['pbk'],
-          if ((p['sid'] ?? '').isNotEmpty)
-            'short_id': p['sid'],
-        };
+      if (security == 'reality') {
+        final publicKey = params['pbk'] ?? '';
+
+        if (publicKey.isNotEmpty) {
+          tls['reality'] = {
+            'enabled': true,
+            'public_key': publicKey,
+            if ((params['sid'] ?? '').isNotEmpty)
+              'short_id': params['sid'],
+          };
+        }
       }
 
-      out['tls'] = tls;
+      outbound['tls'] = tls;
     }
 
     addTransport(
-      out,
-      p['type'] ??
-          p['network'] ??
+      outbound,
+      params['type'] ??
+          params['network'] ??
           'tcp',
-      p['path'] ?? '',
-      p['host'] ?? '',
+      params['path'] ?? '',
+      params['host'] ?? '',
     );
 
-    return out;
+    return outbound;
   }
 
-  Map<String, dynamic> trojan(Uri u) {
-    final p = u.queryParameters;
+  Map<String, dynamic> trojan(Uri uri) {
+    final params = uri.queryParameters;
 
-    final out = <String, dynamic>{
+    final outbound = <String, dynamic>{
       'type': 'trojan',
       'tag': 'proxy',
-      'server': u.host,
-      'server_port': u.port,
-      'password': u.userInfo,
+      'server': uri.host,
+      'server_port': uri.port,
+      'password': uri.userInfo,
       'tls': {
         'enabled': true,
         'server_name':
-            p['sni'] ??
-            p['host'] ??
-            u.host,
+            params['sni'] ??
+            params['host'] ??
+            uri.host,
       },
     };
 
     addTransport(
-      out,
-      p['type'] ?? 'tcp',
-      p['path'] ?? '',
-      p['host'] ?? '',
+      outbound,
+      params['type'] ?? 'tcp',
+      params['path'] ?? '',
+      params['host'] ?? '',
     );
 
-    return out;
+    return outbound;
   }
 
   Map<String, dynamic>? shadowsocks(
-    Uri u,
+    Uri uri,
     String raw,
   ) {
     try {
-      var user = u.userInfo;
+      var user = uri.userInfo;
 
       if (user.isEmpty) {
-        var b = raw
-            .substring(
-              raw.indexOf('://') + 3,
-            )
-            .split('#')
-            .first;
+        var encoded = raw.substring(
+          raw.indexOf('://') + 3,
+        );
 
-        b = b
+        encoded = encoded
+            .split('#')
+            .first
             .replaceAll('-', '+')
             .replaceAll('_', '/');
 
-        b += '=' *
-            ((4 - b.length % 4) % 4);
+        encoded += '=' *
+            ((4 - encoded.length % 4) % 4);
 
         user = utf8.decode(
-          base64.decode(b),
+          base64.decode(encoded),
           allowMalformed: true,
         );
       }
@@ -648,8 +670,8 @@ class _HomePageState extends State<HomePage> {
       return {
         'type': 'shadowsocks',
         'tag': 'proxy',
-        'server': u.host,
-        'server_port': u.port,
+        'server': uri.host,
+        'server_port': uri.port,
         'method': Uri.decodeComponent(
           user.substring(0, colon),
         ),
@@ -662,84 +684,79 @@ class _HomePageState extends State<HomePage> {
     }
   }
 
-  Map<String, dynamic> hysteria2(
-    Uri u,
-  ) {
-    final p = u.queryParameters;
+  Map<String, dynamic> hysteria2(Uri uri) {
+    final params = uri.queryParameters;
 
     return {
       'type': 'hysteria2',
       'tag': 'proxy',
-      'server': u.host,
-      'server_port': u.port,
-      'password': u.userInfo,
+      'server': uri.host,
+      'server_port': uri.port,
+      'password': uri.userInfo,
       'tls': {
         'enabled': true,
         'server_name':
-            p['sni'] ??
-            p['peer'] ??
-            u.host,
-        if (p['insecure'] == '1')
+            params['sni'] ??
+            params['peer'] ??
+            uri.host,
+        if (params['insecure'] == '1')
           'insecure': true,
       },
     };
   }
 
   void addTransport(
-    Map<String, dynamic> out,
+    Map<String, dynamic> outbound,
     String network,
     String path,
     String host,
   ) {
-    final n = network.toLowerCase();
+    final type = network.toLowerCase();
 
-    if (n == 'ws' ||
-        n == 'websocket') {
-      out['transport'] = {
+    if (type == 'ws' ||
+        type == 'websocket') {
+      outbound['transport'] = {
         'type': 'ws',
-        'path':
-            path.isEmpty ? '/' : path,
+        'path': path.isEmpty ? '/' : path,
         if (host.isNotEmpty)
           'headers': {
             'Host': host,
           },
       };
-    } else if (n == 'grpc') {
-      out['transport'] = {
+    } else if (type == 'grpc') {
+      outbound['transport'] = {
         'type': 'grpc',
         'service_name': path,
       };
-    } else if (n == 'httpupgrade') {
-      out['transport'] = {
+    } else if (type == 'httpupgrade') {
+      outbound['transport'] = {
         'type': 'httpupgrade',
-        'path':
-            path.isEmpty ? '/' : path,
+        'path': path.isEmpty ? '/' : path,
         if (host.isNotEmpty)
           'host': host,
       };
-    } else if (n == 'h2' ||
-        n == 'http') {
-      out['transport'] = {
+    } else if (type == 'h2' ||
+        type == 'http') {
+      outbound['transport'] = {
         'type': 'http',
-        'path':
-            path.isEmpty ? '/' : path,
+        'path': path.isEmpty ? '/' : path,
         if (host.isNotEmpty)
           'host': [host],
       };
     }
   }
 
-  String makeConfig(Server s) {
-    final out =
+  String makeConfig(Server server) {
+    final outbound =
         Map<String, dynamic>.from(
-      s.outbound,
+      server.outbound,
     );
 
-    out['tag'] = 'proxy';
+    outbound['tag'] = 'proxy';
 
     return jsonEncode({
       'log': {
-        'level': 'info',
+        'level': 'warn',
       },
 
       'dns': {
@@ -755,7 +772,6 @@ class _HomePageState extends State<HomePage> {
               'server_name':
                   'cloudflare-dns.com',
             },
-            'detour': 'proxy',
           },
         ],
         'final': 'dns-remote',
@@ -769,14 +785,13 @@ class _HomePageState extends State<HomePage> {
             '172.19.0.1/30',
           ],
           'auto_route': true,
-          'strict_route': true,
           'stack': 'mixed',
           'mtu': 1500,
         },
       ],
 
       'outbounds': [
-        out,
+        outbound,
         {
           'type': 'direct',
           'tag': 'direct',
@@ -811,30 +826,28 @@ class _HomePageState extends State<HomePage> {
     if (!silent && mounted) {
       setState(() {
         testing = true;
-        stateText = 'در حال تست Ping...';
+        stateText = 'در حال تست Ping سرورها...';
       });
     }
 
-    for (final s in servers) {
-      final sw = Stopwatch()..start();
+    for (final server in servers) {
+      final stopwatch = Stopwatch()..start();
 
       try {
-        final socket =
-            await Socket.connect(
-          s.host,
-          s.port,
-          timeout:
-              const Duration(
+        final socket = await Socket.connect(
+          server.host,
+          server.port,
+          timeout: const Duration(
             seconds: 3,
           ),
         );
 
         socket.destroy();
 
-        s.ping =
-            sw.elapsedMilliseconds;
+        server.ping =
+            stopwatch.elapsedMilliseconds;
       } catch (_) {
-        s.ping = null;
+        server.ping = null;
       }
 
       if (mounted && !silent) {
@@ -842,35 +855,29 @@ class _HomePageState extends State<HomePage> {
       }
     }
 
-    servers.sort(
-      (a, b) {
-        if (a.ping == null &&
-            b.ping == null) {
-          return 0;
-        }
+    servers.sort((a, b) {
+      if (a.ping == null &&
+          b.ping == null) {
+        return 0;
+      }
 
-        if (a.ping == null) {
-          return 1;
-        }
+      if (a.ping == null) {
+        return 1;
+      }
 
-        if (b.ping == null) {
-          return -1;
-        }
+      if (b.ping == null) {
+        return -1;
+      }
 
-        return a.ping!.compareTo(
-          b.ping!,
-        );
-      },
-    );
+      return a.ping!.compareTo(
+        b.ping!,
+      );
+    });
 
-    if (mounted) {
+    if (mounted && !silent) {
       setState(() {
         testing = false;
-
-        if (!silent) {
-          stateText =
-              'سرورها مرتب شدند';
-        }
+        stateText = 'Ping سرورها تست شد';
       });
     }
   }
@@ -878,7 +885,7 @@ class _HomePageState extends State<HomePage> {
   Server? fastest() {
     final good = servers
         .where(
-          (s) => s.ping != null,
+          (server) => server.ping != null,
         )
         .toList();
 
@@ -887,8 +894,7 @@ class _HomePageState extends State<HomePage> {
     }
 
     good.sort(
-      (a, b) =>
-          a.ping!.compareTo(
+      (a, b) => a.ping!.compareTo(
         b.ping!,
       ),
     );
@@ -904,68 +910,55 @@ class _HomePageState extends State<HomePage> {
       return;
     }
 
-    if (connected || connecting) {
-      return;
+    if (mounted) {
+      setState(() {
+        connecting = true;
+        stateText =
+            'در حال انتخاب سریع‌ترین سرور...';
+      });
     }
 
-    setState(() {
-      connecting = true;
-      vpnError = '';
-      stateText =
-          'در حال انتخاب سریع‌ترین سرور...';
-    });
+    if (servers.every(
+      (server) => server.ping == null,
+    )) {
+      await testAll(silent: true);
+    }
 
-    try {
-      if (servers.every(
-        (s) => s.ping == null,
-      )) {
-        await testAll(
-          silent: true,
-        );
-      }
+    final best = fastest();
 
-      final best = fastest();
-
-      if (best == null) {
+    if (best == null) {
+      if (mounted) {
         setState(() {
           connecting = false;
           stateText =
               'سرور قابل اتصال پیدا نشد';
         });
-
-        return;
       }
 
-      setState(() {
-        stateText =
-            'در حال اتصال به ${best.name}...';
-      });
+      return;
+    }
 
-      final ok =
+    try {
+      final permission =
           await vpn.requestVPNPermission();
 
-      if (!ok) {
+      if (!permission) {
         throw Exception(
           'VPN permission denied',
         );
       }
 
-      final config =
-          makeConfig(best);
+      final config = makeConfig(best);
 
-      await vpn.checkConfig(
-        config,
-      );
+      await vpn.checkConfig(config);
 
       await vpn.connect(
         SessionOptions(
           config: config,
-          networkMode:
-              NetworkMode.vpn,
+          networkMode: NetworkMode.vpn,
           notification:
               NotificationConfig(
-            title:
-                'Light speed 🔥',
+            title: 'Light speed 🔥',
             showTrafficStats: true,
             showStopButton: true,
             stopButtonLabel:
@@ -974,34 +967,38 @@ class _HomePageState extends State<HomePage> {
         ),
       );
 
-      if (!mounted) {
-        return;
-      }
+      if (!mounted) return;
 
       setState(() {
         connecting = false;
         connected = true;
-        vpnError = '';
+        connectedAt = DateTime.now();
+
+        downloadBps = 0;
+        uploadBps = 0;
+
+        downloadTotalBytes = 0;
+        uploadTotalBytes = 0;
+
+        downloadHistory.clear();
+        uploadHistory.clear();
+
         stateText =
             'متصل • ${best.name}';
       });
-    } catch (e) {
-      if (!mounted) {
-        return;
-      }
 
-      final error = e.toString();
+      _startDurationTimer();
+    } catch (e) {
+      if (!mounted) return;
 
       setState(() {
         connecting = false;
         connected = false;
-        vpnError = error;
-        stateText =
-            'اتصال ناموفق';
+        stateText = 'اتصال ناموفق';
       });
 
       snack(
-        'خطای VPN:\n$error',
+        'خطای VPN: $e',
       );
     }
   }
@@ -1011,104 +1008,298 @@ class _HomePageState extends State<HomePage> {
       await vpn.disconnect();
     } catch (_) {}
 
-    if (mounted) {
+    durationTimer?.cancel();
+
+    if (!mounted) return;
+
+    setState(() {
+      connected = false;
+      connecting = false;
+
+      stateText = 'اتصال قطع شد';
+
+      downloadBps = 0;
+      uploadBps = 0;
+
+      downloadTotalBytes = 0;
+      uploadTotalBytes = 0;
+
+      connectionDuration =
+          Duration.zero;
+
+      connectedAt = null;
+
+      downloadHistory.clear();
+      uploadHistory.clear();
+    });
+  }
+
+  void _startDurationTimer() {
+    durationTimer?.cancel();
+
+    durationTimer = Timer.periodic(
+      const Duration(seconds: 1),
+      (_) {
+        if (!mounted ||
+            connectedAt == null) {
+          return;
+        }
+
+        setState(() {
+          connectionDuration =
+              DateTime.now()
+                  .difference(
+                    connectedAt!,
+                  );
+        });
+      },
+    );
+  }
+
+  Future<void> runSpeedTest() async {
+    if (!connected) {
+      snack(
+        'ابتدا VPN را وصل کن',
+      );
+      return;
+    }
+
+    if (speedTesting) {
+      return;
+    }
+
+    setState(() {
+      speedTesting = true;
+      speedTestDownload = 0;
+      speedTestUpload = 0;
+      stateText =
+          'در حال تست سرعت دانلود...';
+    });
+
+    try {
+      final download =
+          await _downloadSpeedTest();
+
+      if (!mounted) return;
+
       setState(() {
-        connected = false;
-        connecting = false;
+        speedTestDownload = download;
         stateText =
-            'اتصال قطع شد';
-        vpnError = '';
-
-        download = '0 Mbps';
-        upload = '0 Mbps';
-
-        downloadTotalBytes = 0;
-        uploadTotalBytes = 0;
+            'در حال تست سرعت آپلود...';
       });
+
+      final upload =
+          await _uploadSpeedTest();
+
+      if (!mounted) return;
+
+      setState(() {
+        speedTestUpload = upload;
+        speedTesting = false;
+        stateText =
+            'تست سرعت کامل شد';
+      });
+    } catch (e) {
+      if (!mounted) return;
+
+      setState(() {
+        speedTesting = false;
+        stateText =
+            'تست سرعت ناموفق بود';
+      });
+
+      snack(
+        'تست سرعت انجام نشد',
+      );
     }
   }
 
-  String speed(dynamic bps) {
-    final n =
-        bps is num
-            ? bps.toDouble()
-            : 0.0;
+  Future<double> _downloadSpeedTest() async {
+    final client = http.Client();
 
-    if (n <= 0) {
+    try {
+      final uri = Uri.parse(
+        'https://speed.cloudflare.com/__down?bytes=8000000',
+      );
+
+      final request =
+          http.Request(
+        'GET',
+        uri,
+      );
+
+      final stopwatch =
+          Stopwatch()..start();
+
+      final response =
+          await client.send(request);
+
+      if (response.statusCode < 200 ||
+          response.statusCode >= 300) {
+        throw Exception(
+          'Download test failed',
+        );
+      }
+
+      int bytes = 0;
+
+      await for (final chunk
+          in response.stream) {
+        bytes += chunk.length;
+
+        if (stopwatch.elapsedMilliseconds >=
+            5000) {
+          break;
+        }
+      }
+
+      stopwatch.stop();
+
+      final seconds =
+          max(
+            stopwatch.elapsedMilliseconds /
+                1000,
+            0.001,
+          );
+
+      return (bytes * 8) / seconds;
+    } finally {
+      client.close();
+    }
+  }
+
+  Future<double> _uploadSpeedTest() async {
+    final client = http.Client();
+
+    try {
+      final uri = Uri.parse(
+        'https://speed.cloudflare.com/__up',
+      );
+
+      final payload =
+          List<int>.generate(
+        2000000,
+        (_) => Random().nextInt(256),
+      );
+
+      final stopwatch =
+          Stopwatch()..start();
+
+      final response =
+          await client.post(
+        uri,
+        body: payload,
+        headers: const {
+          'Content-Type':
+              'application/octet-stream',
+        },
+      );
+
+      stopwatch.stop();
+
+      if (response.statusCode < 200 ||
+          response.statusCode >= 300) {
+        throw Exception(
+          'Upload test failed',
+        );
+      }
+
+      final seconds =
+          max(
+            stopwatch.elapsedMilliseconds /
+                1000,
+            0.001,
+          );
+
+      return (payload.length * 8) /
+          seconds;
+    } finally {
+      client.close();
+    }
+  }
+
+  String formatSpeed(double bps) {
+    if (bps <= 0) {
       return '0 Mbps';
     }
 
-    if (n >= 1000000000) {
-      return '${(n / 1000000000).toStringAsFixed(2)} Gbps';
+    if (bps >= 1000000000) {
+      return
+          '${(bps / 1000000000).toStringAsFixed(2)} Gbps';
     }
 
-    if (n >= 1000000) {
-      return '${(n / 1000000).toStringAsFixed(2)} Mbps';
+    if (bps >= 1000000) {
+      return
+          '${(bps / 1000000).toStringAsFixed(2)} Mbps';
     }
 
-    if (n >= 1000) {
-      return '${(n / 1000).toStringAsFixed(1)} Kbps';
+    if (bps >= 1000) {
+      return
+          '${(bps / 1000).toStringAsFixed(1)} Kbps';
     }
 
-    return '${n.toStringAsFixed(0)} bps';
+    return
+        '${bps.toStringAsFixed(0)} bps';
   }
 
-  String size(int? n) {
-    if (n == null || n <= 0) {
-      return 'نامشخص';
+  String formatBytes(
+    int? bytes, {
+    String unknown = 'نامشخص',
+  }) {
+    if (bytes == null ||
+        bytes <= 0) {
+      return unknown;
     }
 
-    if (n < 1024 * 1024) {
-      return '${(n / 1024).toStringAsFixed(1)} KB';
+    if (bytes < 1024) {
+      return '$bytes B';
     }
 
-    if (n <
-        1024 * 1024 * 1024) {
-      return '${(n / 1024 / 1024).toStringAsFixed(1)} MB';
+    if (bytes < 1024 * 1024) {
+      return
+          '${(bytes / 1024).toStringAsFixed(1)} KB';
     }
 
-    return '${(n / 1024 / 1024 / 1024).toStringAsFixed(2)} GB';
+    if (bytes < 1024 * 1024 * 1024) {
+      return
+          '${(bytes / 1024 / 1024).toStringAsFixed(1)} MB';
+    }
+
+    if (bytes <
+        1024 *
+            1024 *
+            1024 *
+            1024) {
+      return
+          '${(bytes / 1024 / 1024 / 1024).toStringAsFixed(2)} GB';
+    }
+
+    return
+        '${(bytes / 1024 / 1024 / 1024 / 1024).toStringAsFixed(2)} TB';
   }
 
-  String remainingTime() {
-    if (expireAt == null ||
-        expireAt! <= 0) {
-      return 'نامشخص';
-    }
-
-    final now =
-        DateTime.now()
-            .millisecondsSinceEpoch ~/
-            1000;
-
-    final seconds =
-        expireAt! - now;
-
-    if (seconds <= 0) {
-      return 'منقضی شده';
-    }
-
-    final days =
-        seconds ~/ 86400;
-
+  String formatDuration(
+    Duration duration,
+  ) {
     final hours =
-        (seconds % 86400) ~/ 3600;
+        duration.inHours
+            .toString()
+            .padLeft(2, '0');
 
     final minutes =
-        (seconds % 3600) ~/ 60;
+        (duration.inMinutes % 60)
+            .toString()
+            .padLeft(2, '0');
 
-    if (days > 0) {
-      return '$days روز و $hours ساعت';
-    }
+    final seconds =
+        (duration.inSeconds % 60)
+            .toString()
+            .padLeft(2, '0');
 
-    if (hours > 0) {
-      return '$hours ساعت و $minutes دقیقه';
-    }
-
-    return '$minutes دقیقه';
+    return '$hours:$minutes:$seconds';
   }
 
-  String expireDate() {
+  String expiryText() {
     if (expireAt == null ||
         expireAt! <= 0) {
       return 'نامشخص';
@@ -1119,7 +1310,59 @@ class _HomePageState extends State<HomePage> {
       expireAt! * 1000,
     );
 
-    return '${date.year}/${date.month.toString().padLeft(2, '0')}/${date.day.toString().padLeft(2, '0')}';
+    final remaining =
+        date.difference(DateTime.now());
+
+    if (remaining.isNegative) {
+      return 'منقضی شده';
+    }
+
+    final days =
+        remaining.inDays;
+
+    final hours =
+        remaining.inHours % 24;
+
+    return '$days روز و $hours ساعت';
+  }
+
+  String expiryDateText() {
+    if (expireAt == null ||
+        expireAt! <= 0) {
+      return 'نامشخص';
+    }
+
+    final date =
+        DateTime.fromMillisecondsSinceEpoch(
+      expireAt! * 1000,
+    );
+
+    return
+        '${date.year}/${date.month.toString().padLeft(2, '0')}/${date.day.toString().padLeft(2, '0')}';
+  }
+
+  int remainingBytes() {
+    if (totalBytes == null) {
+      return 0;
+    }
+
+    return max(
+      0,
+      totalBytes! -
+          (usedBytes ?? 0),
+    );
+  }
+
+  double usagePercent() {
+    if (totalBytes == null ||
+        totalBytes! <= 0) {
+      return 0;
+    }
+
+    return (
+      (usedBytes ?? 0) /
+      totalBytes!
+    ).clamp(0.0, 1.0);
   }
 
   void snack(String text) {
@@ -1130,16 +1373,16 @@ class _HomePageState extends State<HomePage> {
     ).showSnackBar(
       SnackBar(
         content: Text(text),
-        duration:
-            const Duration(
-          seconds: 5,
-        ),
+        behavior:
+            SnackBarBehavior.floating,
       ),
     );
   }
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(
+    BuildContext context,
+  ) {
     final pages = [
       _home(),
       _servers(),
@@ -1158,10 +1401,9 @@ class _HomePageState extends State<HomePage> {
         bottomNavigationBar:
             NavigationBar(
           selectedIndex: page,
-          onDestinationSelected:
-              (i) {
+          onDestinationSelected: (index) {
             setState(() {
-              page = i;
+              page = index;
             });
           },
           destinations: const [
@@ -1218,7 +1460,7 @@ class _HomePageState extends State<HomePage> {
 
   Widget header(
     String title,
-    String sub,
+    String subtitle,
   ) {
     return Padding(
       padding:
@@ -1228,8 +1470,8 @@ class _HomePageState extends State<HomePage> {
       child: Row(
         children: [
           Container(
-            width: 46,
-            height: 46,
+            width: 48,
+            height: 48,
             decoration:
                 const BoxDecoration(
               shape: BoxShape.circle,
@@ -1246,13 +1488,10 @@ class _HomePageState extends State<HomePage> {
               color: Colors.white,
             ),
           ),
-          const SizedBox(
-            width: 12,
-          ),
+          const SizedBox(width: 12),
           Column(
             crossAxisAlignment:
-                CrossAxisAlignment
-                    .start,
+                CrossAxisAlignment.start,
             children: [
               Text(
                 title,
@@ -1263,8 +1502,9 @@ class _HomePageState extends State<HomePage> {
                       FontWeight.w800,
                 ),
               ),
+              const SizedBox(height: 3),
               Text(
-                sub,
+                subtitle,
                 style:
                     const TextStyle(
                   color:
@@ -1291,342 +1531,211 @@ class _HomePageState extends State<HomePage> {
         color:
             const Color(0xFF0D1728),
         borderRadius:
-            BorderRadius.circular(
-          22,
-        ),
-        border:
-            Border.all(
+            BorderRadius.circular(22),
+        border: Border.all(
           color: Colors.white
-              .withValues(
-            alpha: .05,
-          ),
+              .withValues(alpha: .05),
         ),
       ),
       child: child,
     );
   }
 
-  Widget _home() {
-    final best = fastest();
-
-    final percent =
-        totalBytes == null ||
-                totalBytes! <= 0
-            ? 0.0
-            : ((usedBytes ?? 0) /
-                    totalBytes!)
-                .clamp(
-                  0.0,
-                  1.0,
-                );
-
-    return ListView(
-      padding:
-          const EdgeInsets.all(
-        18,
-      ),
-      children: [
-        header(
-          'Light speed 🔥',
-          'VPN واقعی با sing-box',
-        ),
-
-        const SizedBox(
-          height: 8,
-        ),
-
-        Center(
-          child:
-              GestureDetector(
-            onTap: connecting
-                ? null
-                : (connected
-                    ? disconnect
-                    : connect),
-            child: Container(
-              width: 200,
-              height: 200,
-              decoration:
-                  BoxDecoration(
-                shape:
-                    BoxShape.circle,
-                gradient:
-                    LinearGradient(
-                  colors: connected
-                      ? const [
-                          Color(
-                            0xFF00E676,
-                          ),
-                          Color(
-                            0xFF00B8D4,
-                          ),
-                        ]
-                      : const [
-                          Color(
-                            0xFF00E5FF,
-                          ),
-                          Color(
-                            0xFF7C4DFF,
-                          ),
-                        ],
-                ),
-                boxShadow: [
-                  BoxShadow(
-                    color: (connected
-                            ? const Color(
-                                0xFF00E676,
-                              )
-                            : const Color(
-                                0xFF00E5FF,
-                              ))
-                        .withValues(
-                      alpha: .35,
-                    ),
-                    blurRadius: 40,
-                    spreadRadius: 8,
-                  ),
-                ],
+  Widget statCard({
+    required IconData icon,
+    required String title,
+    required String value,
+    String? subtitle,
+  }) {
+    return card(
+      Row(
+        children: [
+          Container(
+            width: 46,
+            height: 46,
+            decoration:
+                BoxDecoration(
+              color: const Color(
+                0xFF00E5FF,
+              ).withValues(
+                alpha: .10,
               ),
-              child:
-                  Center(
-                child:
-                    Container(
-                  width: 176,
-                  height: 176,
-                  decoration:
-                      const BoxDecoration(
-                    shape:
-                        BoxShape.circle,
-                    color:
-                        Color(
-                      0xFF081322,
-                    ),
-                  ),
-                  child:
-                      Center(
-                    child: connecting
-                        ? const CircularProgressIndicator()
-                        : Column(
-                            mainAxisAlignment:
-                                MainAxisAlignment.center,
-                            children: [
-                              Icon(
-                                connected
-                                    ? Icons
-                                        .power
-                                    : Icons
-                                        .bolt,
-                                size: 48,
-                                color: connected
-                                    ? const Color(
-                                        0xFF00E676,
-                                      )
-                                    : const Color(
-                                        0xFF00E5FF,
-                                      ),
-                              ),
-                              const SizedBox(
-                                height: 8,
-                              ),
-                              Text(
-                                connected
-                                    ? 'قطع اتصال'
-                                    : 'اتصال',
-                                style:
-                                    const TextStyle(
-                                  fontSize:
-                                      18,
-                                  fontWeight:
-                                      FontWeight.bold,
-                                ),
-                              ),
-                            ],
-                          ),
-                  ),
-                ),
+              borderRadius:
+                  BorderRadius.circular(
+                14,
+              ),
+            ),
+            child: Icon(
+              icon,
+              color:
+                  const Color(
+                0xFF00E5FF,
               ),
             ),
           ),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment:
+                  CrossAxisAlignment
+                      .start,
+              children: [
+                Text(
+                  title,
+                  style:
+                      const TextStyle(
+                    color:
+                        Colors.white54,
+                  ),
+                ),
+                const SizedBox(
+                  height: 3,
+                ),
+                Text(
+                  value,
+                  style:
+                      const TextStyle(
+                    fontSize: 19,
+                    fontWeight:
+                        FontWeight.bold,
+                  ),
+                ),
+                if (subtitle != null)
+                  Text(
+                    subtitle,
+                    style:
+                        const TextStyle(
+                      color:
+                          Colors.white38,
+                      fontSize: 12,
+                    ),
+                  ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _home() {
+    final best = fastest();
+
+    return ListView(
+      padding:
+          const EdgeInsets.all(18),
+      children: [
+        header(
+          'Light speed 🔥',
+          'VPN Client • sing-box',
         ),
 
-        const SizedBox(
-          height: 16,
-        ),
+        _connectionButton(),
+
+        const SizedBox(height: 14),
 
         Center(
           child: Text(
             stateText,
-            textAlign:
-                TextAlign.center,
             style: TextStyle(
               color: connected
                   ? const Color(
                       0xFF00E676,
                     )
                   : Colors.white70,
+              fontWeight:
+                  FontWeight.w600,
             ),
           ),
         ),
 
-        if (vpnError.isNotEmpty) ...[
-          const SizedBox(
-            height: 12,
-          ),
+        const SizedBox(height: 18),
+
+        if (best != null)
           card(
-            Column(
-              crossAxisAlignment:
-                  CrossAxisAlignment
-                      .start,
+            Row(
               children: [
-                Row(
-                  children: [
-                    const Icon(
-                      Icons.error_outline,
-                      color:
-                          Colors.redAccent,
-                    ),
-                    const SizedBox(
-                      width: 8,
-                    ),
-                    const Expanded(
-                      child: Text(
-                        'جزئیات خطای VPN',
+                const Icon(
+                  Icons.public,
+                  color:
+                      Color(0xFF00E5FF),
+                ),
+                const SizedBox(
+                  width: 12,
+                ),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment:
+                        CrossAxisAlignment
+                            .start,
+                    children: [
+                      const Text(
+                        'سرور انتخاب‌شده',
                         style:
                             TextStyle(
+                          color:
+                              Colors.white54,
+                        ),
+                      ),
+                      const SizedBox(
+                        height: 3,
+                      ),
+                      Text(
+                        best.name,
+                        maxLines: 1,
+                        overflow:
+                            TextOverflow
+                                .ellipsis,
+                        style:
+                            const TextStyle(
                           fontWeight:
                               FontWeight.bold,
                         ),
                       ),
-                    ),
-                  ],
-                ),
-                const SizedBox(
-                  height: 10,
-                ),
-                SelectableText(
-                  vpnError,
-                  style:
-                      const TextStyle(
-                    color:
-                        Colors.white70,
+                    ],
                   ),
                 ),
+                if (best.ping != null)
+                  Text(
+                    '${best.ping} ms',
+                    style:
+                        const TextStyle(
+                      fontWeight:
+                          FontWeight.bold,
+                    ),
+                  ),
               ],
             ),
           ),
-        ],
-
-        const SizedBox(
-          height: 8,
-        ),
-
-        card(
-          Row(
-            children: [
-              const Icon(
-                Icons.public,
-                color:
-                    Color(0xFF00E5FF),
-              ),
-              const SizedBox(
-                width: 12,
-              ),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment:
-                      CrossAxisAlignment
-                          .start,
-                  children: [
-                    const Text(
-                      'سریع‌ترین سرور',
-                      style:
-                          TextStyle(
-                        color:
-                            Colors.white54,
-                      ),
-                    ),
-                    Text(
-                      best?.name ??
-                          'هنوز انتخاب نشده',
-                      maxLines: 1,
-                      overflow:
-                          TextOverflow
-                              .ellipsis,
-                    ),
-                  ],
-                ),
-              ),
-              if (best?.ping != null)
-                Text(
-                  '${best!.ping} ms',
-                ),
-            ],
-          ),
-        ),
 
         Row(
           children: [
             Expanded(
-              child: card(
-                Column(
-                  crossAxisAlignment:
-                      CrossAxisAlignment
-                          .start,
-                  children: [
-                    const Text(
-                      'دانلود',
-                      style:
-                          TextStyle(
-                        color:
-                            Colors.white54,
-                      ),
-                    ),
-                    Text(
-                      download,
-                      style:
-                          const TextStyle(
-                        fontSize: 18,
-                        fontWeight:
-                            FontWeight
-                                .bold,
-                      ),
-                    ),
-                  ],
+              child: statCard(
+                icon:
+                    Icons.download,
+                title: 'دانلود زنده',
+                value:
+                    formatSpeed(
+                  downloadBps,
                 ),
+                subtitle:
+                    'سرعت لحظه‌ای',
               ),
             ),
-
             const SizedBox(
               width: 10,
             ),
-
             Expanded(
-              child: card(
-                Column(
-                  crossAxisAlignment:
-                      CrossAxisAlignment
-                          .start,
-                  children: [
-                    const Text(
-                      'آپلود',
-                      style:
-                          TextStyle(
-                        color:
-                            Colors.white54,
-                      ),
-                    ),
-                    Text(
-                      upload,
-                      style:
-                          const TextStyle(
-                        fontSize: 18,
-                        fontWeight:
-                            FontWeight
-                                .bold,
-                      ),
-                    ),
-                  ],
+              child: statCard(
+                icon: Icons.upload,
+                title: 'آپلود زنده',
+                value:
+                    formatSpeed(
+                  uploadBps,
                 ),
+                subtitle:
+                    'سرعت لحظه‌ای',
               ),
             ),
           ],
@@ -1634,14 +1743,11 @@ class _HomePageState extends State<HomePage> {
 
         card(
           Column(
-            crossAxisAlignment:
-                CrossAxisAlignment
-                    .start,
             children: [
               Row(
                 children: [
                   const Icon(
-                    Icons.data_usage,
+                    Icons.timer,
                     color:
                         Color(0xFF7C4DFF),
                   ),
@@ -1650,62 +1756,28 @@ class _HomePageState extends State<HomePage> {
                   ),
                   const Expanded(
                     child: Text(
-                      'حجم اشتراک',
+                      'مدت اتصال',
                     ),
                   ),
                   Text(
-                    size(totalBytes),
+                    formatDuration(
+                      connectionDuration,
+                    ),
+                    style:
+                        const TextStyle(
+                      fontWeight:
+                          FontWeight.bold,
+                    ),
                   ),
                 ],
               ),
-
-              const SizedBox(
-                height: 12,
+              const Divider(
+                height: 24,
               ),
-
-              LinearProgressIndicator(
-                value: percent,
-                minHeight: 9,
-              ),
-
-              const SizedBox(
-                height: 10,
-              ),
-
-              Text(
-                'مصرف: ${size(usedBytes)}',
-              ),
-
-              const SizedBox(
-                height: 8,
-              ),
-
-              Text(
-                'باقی‌مانده: ${size(
-                  totalBytes == null
-                      ? null
-                      : max(
-                          0,
-                          totalBytes! -
-                              (usedBytes ??
-                                  0),
-                        ),
-                )}',
-              ),
-            ],
-          ),
-        ),
-
-        card(
-          Column(
-            crossAxisAlignment:
-                CrossAxisAlignment
-                    .start,
-            children: [
               Row(
                 children: [
                   const Icon(
-                    Icons.event,
+                    Icons.download_done,
                     color:
                         Color(0xFF00E5FF),
                   ),
@@ -1714,50 +1786,288 @@ class _HomePageState extends State<HomePage> {
                   ),
                   const Expanded(
                     child: Text(
-                      'تاریخ انقضا',
+                      'دریافت این جلسه',
                     ),
                   ),
                   Text(
-                    expireDate(),
+                    formatBytes(
+                      downloadTotalBytes,
+                    ),
                   ),
                 ],
               ),
               const SizedBox(
-                height: 8,
+                height: 10,
               ),
               Row(
                 children: [
                   const Icon(
-                    Icons.timer_outlined,
+                    Icons.upload_file,
                     color:
-                        Color(0xFF7C4DFF),
+                        Color(0xFF00E676),
                   ),
                   const SizedBox(
                     width: 8,
                   ),
                   const Expanded(
                     child: Text(
-                      'زمان باقی‌مانده',
+                      'ارسال این جلسه',
                     ),
                   ),
                   Text(
-                    remainingTime(),
+                    formatBytes(
+                      uploadTotalBytes,
+                    ),
                   ),
                 ],
               ),
             ],
           ),
         ),
+
+        card(
+          Column(
+            crossAxisAlignment:
+                CrossAxisAlignment.start,
+            children: [
+              const Row(
+                children: [
+                  Icon(
+                    Icons.data_usage,
+                    color:
+                        Color(0xFF7C4DFF),
+                  ),
+                  SizedBox(width: 8),
+                  Text(
+                    'اشتراک',
+                    style:
+                        TextStyle(
+                      fontWeight:
+                          FontWeight.bold,
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(
+                height: 14,
+              ),
+              Row(
+                mainAxisAlignment:
+                    MainAxisAlignment
+                        .spaceBetween,
+                children: [
+                  Text(
+                    'کل: ${formatBytes(totalBytes)}',
+                  ),
+                  Text(
+                    'باقی‌مانده: ${formatBytes(remainingBytes())}',
+                  ),
+                ],
+              ),
+              const SizedBox(
+                height: 10,
+              ),
+              LinearProgressIndicator(
+                value: usagePercent(),
+                minHeight: 9,
+                borderRadius:
+                    BorderRadius.circular(
+                  20,
+                ),
+              ),
+              const SizedBox(
+                height: 10,
+              ),
+              Text(
+                'مصرف: ${formatBytes(usedBytes)}',
+                style:
+                    const TextStyle(
+                  color:
+                      Colors.white60,
+                ),
+              ),
+            ],
+          ),
+        ),
+
+        card(
+          Row(
+            children: [
+              const Icon(
+                Icons.event,
+                color:
+                    Color(0xFFFFC107),
+              ),
+              const SizedBox(
+                width: 10,
+              ),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment:
+                      CrossAxisAlignment
+                          .start,
+                  children: [
+                    const Text(
+                      'انقضا',
+                      style:
+                          TextStyle(
+                        color:
+                            Colors.white54,
+                      ),
+                    ),
+                    Text(
+                      expiryDateText(),
+                      style:
+                          const TextStyle(
+                        fontWeight:
+                            FontWeight.bold,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              Text(
+                expiryText(),
+                style:
+                    const TextStyle(
+                  color:
+                      Colors.white70,
+                ),
+              ),
+            ],
+          ),
+        ),
+
+        const SizedBox(
+          height: 8,
+        ),
+
+        OutlinedButton.icon(
+          onPressed:
+              speedTesting ||
+                      !connected
+                  ? null
+                  : runSpeedTest,
+          icon: speedTesting
+              ? const SizedBox(
+                  width: 18,
+                  height: 18,
+                  child:
+                      CircularProgressIndicator(
+                    strokeWidth: 2,
+                  ),
+                )
+              : const Icon(
+                  Icons.speed,
+                ),
+          label: Text(
+            speedTesting
+                ? 'در حال تست سرعت...'
+                : 'تست واقعی سرعت',
+          ),
+        ),
       ],
+    );
+  }
+
+  Widget _connectionButton() {
+    final glowColor = connected
+        ? const Color(0xFF00E676)
+        : const Color(0xFF00E5FF);
+
+    return Center(
+      child: GestureDetector(
+        onTap: connecting
+            ? null
+            : connected
+                ? disconnect
+                : connect,
+        child: AnimatedContainer(
+          duration:
+              const Duration(
+            milliseconds: 300,
+          ),
+          width: 210,
+          height: 210,
+          decoration:
+              BoxDecoration(
+            shape: BoxShape.circle,
+            gradient:
+                LinearGradient(
+              colors: connected
+                  ? const [
+                      Color(0xFF00E676),
+                      Color(0xFF00B8D4),
+                    ]
+                  : const [
+                      Color(0xFF00E5FF),
+                      Color(0xFF7C4DFF),
+                    ],
+            ),
+            boxShadow: [
+              BoxShadow(
+                color: glowColor
+                    .withValues(
+                  alpha: .30,
+                ),
+                blurRadius: 45,
+                spreadRadius: 8,
+              ),
+            ],
+          ),
+          child: Center(
+            child: Container(
+              width: 184,
+              height: 184,
+              decoration:
+                  const BoxDecoration(
+                shape: BoxShape.circle,
+                color:
+                    Color(0xFF081322),
+              ),
+              child: Center(
+                child: connecting
+                    ? const CircularProgressIndicator()
+                    : Column(
+                        mainAxisAlignment:
+                            MainAxisAlignment
+                                .center,
+                        children: [
+                          Icon(
+                            connected
+                                ? Icons.power
+                                : Icons.bolt,
+                            size: 50,
+                            color: glowColor,
+                          ),
+                          const SizedBox(
+                            height: 8,
+                          ),
+                          Text(
+                            connected
+                                ? 'قطع اتصال'
+                                : 'اتصال',
+                            style:
+                                const TextStyle(
+                              fontSize: 18,
+                              fontWeight:
+                                  FontWeight.bold,
+                            ),
+                          ),
+                        ],
+                      ),
+              ),
+            ),
+          ),
+        ),
+      ),
     );
   }
 
   Widget _servers() {
     return ListView(
       padding:
-          const EdgeInsets.all(
-        18,
-      ),
+          const EdgeInsets.all(18),
       children: [
         header(
           'سرورها',
@@ -1774,7 +2084,7 @@ class _HomePageState extends State<HomePage> {
           label: Text(
             testing
                 ? 'در حال تست...'
-                : 'تست Ping',
+                : 'تست Ping همه',
           ),
         ),
 
@@ -1784,10 +2094,19 @@ class _HomePageState extends State<HomePage> {
 
         if (servers.isEmpty)
           card(
-            const Center(
-              child: Text(
-                'هنوز سروری دریافت نشده است.',
-              ),
+            const Column(
+              children: [
+                Icon(
+                  Icons.dns_outlined,
+                  size: 48,
+                  color:
+                      Colors.white38,
+                ),
+                SizedBox(height: 10),
+                Text(
+                  'هنوز سروری دریافت نشده',
+                ),
+              ],
             ),
           ),
 
@@ -1795,175 +2114,356 @@ class _HomePageState extends State<HomePage> {
             .asMap()
             .entries
             .map(
-              (e) => card(
-                ListTile(
-                  contentPadding:
-                      EdgeInsets.zero,
-                  leading:
-                      CircleAvatar(
-                    child: Text(
-                      '${e.key + 1}',
-                    ),
-                  ),
-                  title: Text(
-                    e.value.name,
-                    maxLines: 1,
-                    overflow:
-                        TextOverflow
-                            .ellipsis,
-                  ),
-                  subtitle: Text(
-                    '${e.value.type} • ${e.value.host}:${e.value.port}',
-                    maxLines: 2,
-                    overflow:
-                        TextOverflow
-                            .ellipsis,
-                  ),
-                  trailing: Text(
-                    e.value.ping ==
-                            null
-                        ? '---'
-                        : '${e.value.ping} ms',
+          (entry) {
+            final index =
+                entry.key;
+            final server =
+                entry.value;
+
+            return card(
+              ListTile(
+                contentPadding:
+                    EdgeInsets.zero,
+                leading:
+                    CircleAvatar(
+                  child: Text(
+                    '${index + 1}',
                   ),
                 ),
+                title: Text(
+                  server.name,
+                  maxLines: 1,
+                  overflow:
+                      TextOverflow
+                          .ellipsis,
+                ),
+                subtitle: Text(
+                  '${server.type} • ${server.host}:${server.port}',
+                  maxLines: 2,
+                  overflow:
+                      TextOverflow
+                          .ellipsis,
+                ),
+                trailing:
+                    server.ping == null
+                        ? const Text(
+                            '---',
+                            style:
+                                TextStyle(
+                              color:
+                                  Colors.white38,
+                            ),
+                          )
+                        : Text(
+                            '${server.ping} ms',
+                            style:
+                                TextStyle(
+                              color:
+                                  server.ping! < 150
+                                      ? const Color(
+                                          0xFF00E676,
+                                        )
+                                      : Colors
+                                          .orange,
+                              fontWeight:
+                                  FontWeight.bold,
+                            ),
+                          ),
               ),
-            ),
+            );
+          },
+        ),
       ],
     );
   }
 
   Widget _traffic() {
-    final remaining =
-        totalBytes == null
-            ? null
-            : max(
-                0,
-                totalBytes! -
-                    (usedBytes ?? 0),
-              );
-
     return ListView(
       padding:
-          const EdgeInsets.all(
-        18,
-      ),
+          const EdgeInsets.all(18),
       children: [
         header(
           'ترافیک',
           'آمار زنده VPN',
         ),
 
-        card(
-          ListTile(
-            title:
-                const Text(
-              'دانلود',
+        Row(
+          children: [
+            Expanded(
+              child: statCard(
+                icon:
+                    Icons.download,
+                title:
+                    'دانلود زنده',
+                value:
+                    formatSpeed(
+                  downloadBps,
+                ),
+              ),
             ),
-            subtitle:
-                Text(download),
-            leading:
-                const Icon(
-              Icons.download,
+            const SizedBox(
+              width: 10,
             ),
-          ),
+            Expanded(
+              child: statCard(
+                icon:
+                    Icons.upload,
+                title:
+                    'آپلود زنده',
+                value:
+                    formatSpeed(
+                  uploadBps,
+                ),
+              ),
+            ),
+          ],
         ),
 
         card(
-          ListTile(
-            title:
-                const Text(
-              'آپلود',
-            ),
-            subtitle:
-                Text(upload),
-            leading:
-                const Icon(
-              Icons.upload,
-            ),
+          Column(
+            crossAxisAlignment:
+                CrossAxisAlignment
+                    .start,
+            children: [
+              const Text(
+                'نمودار سرعت',
+                style:
+                    TextStyle(
+                  fontSize: 17,
+                  fontWeight:
+                      FontWeight.bold,
+                ),
+              ),
+              const SizedBox(
+                height: 15,
+              ),
+              SizedBox(
+                height: 180,
+                child:
+                    SpeedChart(
+                  download:
+                      downloadHistory,
+                  upload:
+                      uploadHistory,
+                ),
+              ),
+              const SizedBox(
+                height: 8,
+              ),
+              const Row(
+                mainAxisAlignment:
+                    MainAxisAlignment
+                        .spaceAround,
+                children: [
+                  Text(
+                    '● دانلود',
+                    style:
+                        TextStyle(
+                      color:
+                          Color(0xFF00E5FF),
+                    ),
+                  ),
+                  Text(
+                    '● آپلود',
+                    style:
+                        TextStyle(
+                      color:
+                          Color(0xFF00E676),
+                    ),
+                  ),
+                ],
+              ),
+            ],
           ),
         ),
 
-        card(
-          ListTile(
-            title:
-                const Text(
-              'حجم مصرف‌شده اشتراک',
-            ),
-            subtitle:
-                Text(
-              size(usedBytes),
-            ),
-            leading:
-                const Icon(
+        statCard(
+          icon:
+              Icons.download_done,
+          title:
+              'دریافت این جلسه',
+          value:
+              formatBytes(
+            downloadTotalBytes,
+          ),
+          subtitle:
+              'از زمان اتصال VPN',
+        ),
+
+        statCard(
+          icon:
+              Icons.upload_file,
+          title:
+              'ارسال این جلسه',
+          value:
+              formatBytes(
+            uploadTotalBytes,
+          ),
+          subtitle:
+              'از زمان اتصال VPN',
+        ),
+
+        statCard(
+          icon:
               Icons.data_usage,
-            ),
+          title:
+              'مصرف کل اشتراک',
+          value:
+              formatBytes(
+            usedBytes,
           ),
         ),
 
-        card(
-          ListTile(
-            title:
-                const Text(
-              'مصرف دانلود این جلسه',
-            ),
-            subtitle:
-                Text(
-              size(
-                downloadTotalBytes,
-              ),
-            ),
-            leading:
-                const Icon(
-              Icons.download,
-            ),
-          ),
-        ),
-
-        card(
-          ListTile(
-            title:
-                const Text(
-              'مصرف آپلود این جلسه',
-            ),
-            subtitle:
-                Text(
-              size(
-                uploadTotalBytes,
-              ),
-            ),
-            leading:
-                const Icon(
-              Icons.upload,
-            ),
-          ),
-        ),
-
-        card(
-          ListTile(
-            title:
-                const Text(
-              'حجم باقی‌مانده',
-            ),
-            subtitle:
-                Text(
-              size(remaining),
-            ),
-            leading:
-                const Icon(
+        statCard(
+          icon:
               Icons.storage,
-            ),
+          title:
+              'باقی‌مانده اشتراک',
+          value:
+              formatBytes(
+            remainingBytes(),
+          ),
+        ),
+
+        statCard(
+          icon:
+              Icons.timer,
+          title:
+              'مدت اتصال',
+          value:
+              formatDuration(
+            connectionDuration,
+          ),
+        ),
+
+        const SizedBox(
+          height: 4,
+        ),
+
+        card(
+          Column(
+            children: [
+              const Text(
+                'تست سرعت',
+                style:
+                    TextStyle(
+                  fontSize: 17,
+                  fontWeight:
+                      FontWeight.bold,
+                ),
+              ),
+              const SizedBox(
+                height: 16,
+              ),
+              Row(
+                children: [
+                  Expanded(
+                    child:
+                        _speedResult(
+                      Icons.download,
+                      'Download',
+                      formatSpeed(
+                        speedTestDownload,
+                      ),
+                    ),
+                  ),
+                  const SizedBox(
+                    width: 10,
+                  ),
+                  Expanded(
+                    child:
+                        _speedResult(
+                      Icons.upload,
+                      'Upload',
+                      formatSpeed(
+                        speedTestUpload,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(
+                height: 14,
+              ),
+              FilledButton.icon(
+                onPressed:
+                    speedTesting ||
+                            !connected
+                        ? null
+                        : runSpeedTest,
+                icon:
+                    const Icon(
+                  Icons.speed,
+                ),
+                label: Text(
+                  speedTesting
+                      ? 'در حال تست...'
+                      : 'شروع تست',
+                ),
+              ),
+            ],
           ),
         ),
       ],
     );
   }
 
+  Widget _speedResult(
+    IconData icon,
+    String title,
+    String value,
+  ) {
+    return Container(
+      padding:
+          const EdgeInsets.all(14),
+      decoration:
+          BoxDecoration(
+        color:
+            const Color(0xFF081322),
+        borderRadius:
+            BorderRadius.circular(
+          16,
+        ),
+      ),
+      child: Column(
+        children: [
+          Icon(
+            icon,
+            color:
+                const Color(0xFF00E5FF),
+          ),
+          const SizedBox(
+            height: 7,
+          ),
+          Text(
+            title,
+            style:
+                const TextStyle(
+              color:
+                  Colors.white54,
+            ),
+          ),
+          const SizedBox(
+            height: 4,
+          ),
+          Text(
+            value,
+            style:
+                const TextStyle(
+              fontSize: 16,
+              fontWeight:
+                  FontWeight.bold,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
   Widget _subscription() {
     return ListView(
       padding:
-          const EdgeInsets.all(
-        18,
-      ),
+          const EdgeInsets.all(18),
       children: [
         header(
           'Subscription',
@@ -1974,17 +2474,12 @@ class _HomePageState extends State<HomePage> {
           controller: url,
           textDirection:
               TextDirection.ltr,
-          maxLines: 3,
           decoration:
               const InputDecoration(
             labelText:
                 'Subscription URL',
-            hintText:
-                'https://...',
             prefixIcon:
                 Icon(Icons.link),
-            border:
-                OutlineInputBorder(),
           ),
         ),
 
@@ -1997,13 +2492,12 @@ class _HomePageState extends State<HomePage> {
               ? null
               : () =>
                   loadSubscription(),
-          icon: const Icon(
-            Icons.refresh,
-          ),
+          icon:
+              const Icon(Icons.refresh),
           label: Text(
             loading
                 ? 'در حال دریافت...'
-                : 'بروزرسانی',
+                : 'بروزرسانی اشتراک',
           ),
         ),
 
@@ -2012,61 +2506,81 @@ class _HomePageState extends State<HomePage> {
         ),
 
         card(
-          const ListTile(
-            leading: Icon(
-              Icons.sync,
-              color:
-                  Color(0xFF00E5FF),
-            ),
-            title: Text(
-              'بروزرسانی خودکار',
-            ),
-            subtitle: Text(
-              'هر ۱۵ دقیقه در زمان قطع بودن VPN',
-            ),
-          ),
-        ),
-
-        card(
           Column(
             crossAxisAlignment:
                 CrossAxisAlignment
                     .start,
             children: [
-              const Text(
-                'اطلاعات اشتراک',
-                style:
-                    TextStyle(
-                  fontSize: 17,
-                  fontWeight:
-                      FontWeight.bold,
-                ),
+              const Row(
+                children: [
+                  Icon(
+                    Icons.cloud_download,
+                    color:
+                        Color(0xFF00E5FF),
+                  ),
+                  SizedBox(width: 8),
+                  Text(
+                    'وضعیت اشتراک',
+                    style:
+                        TextStyle(
+                      fontWeight:
+                          FontWeight.bold,
+                    ),
+                  ),
+                ],
               ),
               const SizedBox(
-                height: 12,
+                height: 15,
               ),
               Text(
-                'حجم کل: ${size(totalBytes)}',
+                'سرورها: ${servers.length}',
               ),
               const SizedBox(
-                height: 6,
+                height: 7,
               ),
               Text(
-                'مصرف: ${size(usedBytes)}',
+                'کل حجم: ${formatBytes(totalBytes)}',
               ),
               const SizedBox(
-                height: 6,
+                height: 7,
               ),
               Text(
-                'انقضا: ${expireDate()}',
+                'مصرف: ${formatBytes(usedBytes)}',
               ),
               const SizedBox(
-                height: 6,
+                height: 7,
               ),
               Text(
-                'زمان باقی‌مانده: ${remainingTime()}',
+                'باقی‌مانده: ${formatBytes(remainingBytes())}',
+              ),
+              const SizedBox(
+                height: 7,
+              ),
+              Text(
+                'انقضا: ${expiryDateText()}',
+              ),
+              const SizedBox(
+                height: 7,
+              ),
+              Text(
+                'زمان باقی‌مانده: ${expiryText()}',
               ),
             ],
+          ),
+        ),
+
+        card(
+          const ListTile(
+            contentPadding:
+                EdgeInsets.zero,
+            leading:
+                Icon(Icons.sync),
+            title:
+                Text('Auto Refresh'),
+            subtitle:
+                Text(
+              'هر ۱۵ دقیقه، در صورت قطع بودن VPN',
+            ),
           ),
         ),
       ],
@@ -2076,38 +2590,62 @@ class _HomePageState extends State<HomePage> {
   Widget _settings() {
     return ListView(
       padding:
-          const EdgeInsets.all(
-        18,
-      ),
+          const EdgeInsets.all(18),
       children: [
         header(
           'تنظیمات',
-          'Light speed',
+          'Light speed 🔥',
         ),
 
         card(
-          const ListTile(
-            leading: Icon(
+          ListTile(
+            contentPadding:
+                EdgeInsets.zero,
+            leading: const Icon(
               Icons.flash_on,
+              color:
+                  Color(0xFFFFC107),
             ),
-            title: Text(
+            title: const Text(
               'انتخاب سریع‌ترین سرور',
             ),
-            subtitle: Text(
-              'بر اساس زمان TCP Connect',
+            subtitle: const Text(
+              'بر اساس TCP Connect Ping',
             ),
           ),
         ),
 
         card(
-          const ListTile(
-            leading: Icon(
-              Icons.sync,
+          ListTile(
+            contentPadding:
+                EdgeInsets.zero,
+            leading: const Icon(
+              Icons.speed,
+              color:
+                  Color(0xFF00E5FF),
             ),
-            title: Text(
+            title: const Text(
+              'تست سرعت',
+            ),
+            subtitle: const Text(
+              'Download / Upload واقعی',
+            ),
+          ),
+        ),
+
+        card(
+          ListTile(
+            contentPadding:
+                EdgeInsets.zero,
+            leading: const Icon(
+              Icons.sync,
+              color:
+                  Color(0xFF7C4DFF),
+            ),
+            title: const Text(
               'Auto Refresh',
             ),
-            subtitle: Text(
+            subtitle: const Text(
               'هر ۱۵ دقیقه',
             ),
           ),
@@ -2115,31 +2653,35 @@ class _HomePageState extends State<HomePage> {
 
         card(
           ListTile(
-            leading:
-                const Icon(
+            contentPadding:
+                EdgeInsets.zero,
+            leading: const Icon(
               Icons.shield,
+              color:
+                  Color(0xFF00E676),
             ),
-            title:
-                const Text(
+            title: const Text(
               'VPN Engine',
             ),
-            subtitle:
-                Text(
+            subtitle: Text(
               'sing-box / Android VpnService\n$stateText',
             ),
           ),
         ),
 
         card(
-          const ListTile(
-            leading: Icon(
+          ListTile(
+            contentPadding:
+                EdgeInsets.zero,
+            leading: const Icon(
               Icons.info_outline,
             ),
-            title: Text(
+            title: const Text(
               'Light speed 🔥',
             ),
             subtitle: Text(
-              'Real VPN Client',
+              'Servers: ${servers.length}\n'
+              'VPN: ${connected ? 'Connected' : 'Disconnected'}',
             ),
           ),
         ),
@@ -2151,11 +2693,160 @@ class _HomePageState extends State<HomePage> {
   void dispose() {
     stateSub?.cancel();
     trafficSub?.cancel();
-    faultSub?.cancel();
-    timer?.cancel();
+
+    refreshTimer?.cancel();
+    durationTimer?.cancel();
 
     url.dispose();
 
     super.dispose();
+  }
+}
+
+class SpeedChart extends StatelessWidget {
+  const SpeedChart({
+    super.key,
+    required this.download,
+    required this.upload,
+  });
+
+  final List<double> download;
+  final List<double> upload;
+
+  @override
+  Widget build(BuildContext context) {
+    return CustomPaint(
+      painter: _SpeedChartPainter(
+        download: download,
+        upload: upload,
+      ),
+      child: const SizedBox.expand(),
+    );
+  }
+}
+
+class _SpeedChartPainter
+    extends CustomPainter {
+  _SpeedChartPainter({
+    required this.download,
+    required this.upload,
+  });
+
+  final List<double> download;
+  final List<double> upload;
+
+  @override
+  void paint(
+    Canvas canvas,
+    Size size,
+  ) {
+    final paintGrid = Paint()
+      ..color = Colors.white
+          .withValues(alpha: .06)
+      ..strokeWidth = 1;
+
+    for (int i = 1; i < 5; i++) {
+      final y =
+          size.height *
+          i /
+          5;
+
+      canvas.drawLine(
+        Offset(0, y),
+        Offset(size.width, y),
+        paintGrid,
+      );
+    }
+
+    _drawLine(
+      canvas,
+      size,
+      download,
+      const Color(0xFF00E5FF),
+    );
+
+    _drawLine(
+      canvas,
+      size,
+      upload,
+      const Color(0xFF00E676),
+    );
+  }
+
+  void _drawLine(
+    Canvas canvas,
+    Size size,
+    List<double> values,
+    Color color,
+  ) {
+    if (values.length < 2) {
+      return;
+    }
+
+    final maxValue = max(
+      1.0,
+      values.reduce(max),
+    );
+
+    final path = Path();
+
+    for (int i = 0;
+        i < values.length;
+        i++) {
+      final x =
+          i *
+          size.width /
+          max(
+            values.length - 1,
+            1,
+          );
+
+      final normalized =
+          values[i] /
+          maxValue;
+
+      final y =
+          size.height -
+          (normalized *
+              (size.height - 12)) -
+          6;
+
+      final point =
+          Offset(x, y);
+
+      if (i == 0) {
+        path.moveTo(
+          point.dx,
+          point.dy,
+        );
+      } else {
+        path.lineTo(
+          point.dx,
+          point.dy,
+        );
+      }
+    }
+
+    final paint = Paint()
+      ..color = color
+      ..style =
+          PaintingStyle.stroke
+      ..strokeWidth = 3
+      ..strokeCap =
+          StrokeCap.round
+      ..strokeJoin =
+          StrokeJoin.round;
+
+    canvas.drawPath(
+      path,
+      paint,
+    );
+  }
+
+  @override
+  bool shouldRepaint(
+    covariant _SpeedChartPainter oldDelegate,
+  ) {
+    return true;
   }
 }
