@@ -23,10 +23,57 @@ jobs:
       - name: Create Android project
         run: flutter create --platforms=android .
 
+      - name: Remove default tests
+        run: rm -rf test
+
+      - name: Configure Android
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          for p in [
+              Path("android/app/build.gradle.kts"),
+              Path("android/app/build.gradle")
+          ]:
+              if not p.exists():
+                  continue
+
+              s = p.read_text()
+
+              s = s.replace(
+                  "minSdk = flutter.minSdkVersion",
+                  "minSdk = 23"
+              )
+
+              s = s.replace(
+                  "minSdkVersion flutter.minSdkVersion",
+                  "minSdkVersion 23"
+              )
+
+              s = s.replace(
+                  "compileSdk = flutter.compileSdkVersion",
+                  "compileSdk = 35"
+              )
+
+              s = s.replace(
+                  "compileSdkVersion flutter.compileSdkVersion",
+                  "compileSdkVersion 35"
+              )
+
+              p.write_text(s)
+          PY
+
+      - name: Check icon
+        run: |
+          if [ ! -f "assets/icon/light_speed_icon.png" ]; then
+            echo "ERROR: Icon file not found!"
+            exit 1
+          fi
+
       - name: Get packages
         run: flutter pub get
 
-      - name: Generate icons
+      - name: Generate launcher icons
         run: dart run flutter_launcher_icons
 
       - name: Analyze
