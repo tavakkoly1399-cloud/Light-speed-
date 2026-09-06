@@ -114,7 +114,6 @@ class _HomePageState extends State<HomePage>
   int downloadTotalBytes = 0;
   int uploadTotalBytes = 0;
 
-  // Subscription information.
   int? totalBytes;
   int? usedBytes;
   int? uploadBytes;
@@ -126,6 +125,9 @@ class _HomePageState extends State<HomePage>
   String lastFault = '';
 
   DateTime? connectedAt;
+
+  final TextEditingController urlController =
+      TextEditingController();
 
   @override
   void initState() {
@@ -211,6 +213,8 @@ class _HomePageState extends State<HomePage>
 
     refreshTimer?.cancel();
 
+    urlController.dispose();
+
     super.dispose();
   }
 
@@ -225,6 +229,7 @@ class _HomePageState extends State<HomePage>
 
     if (saved != null && saved.trim().isNotEmpty) {
       url = saved.trim();
+      urlController.text = url;
 
       if (mounted) {
         setState(() {});
@@ -236,11 +241,15 @@ class _HomePageState extends State<HomePage>
 
   Future<void> saveUrl(String value) async {
     final prefs = await SharedPreferences.getInstance();
-    await prefs.setString('subscription_url', value.trim());
+
+    await prefs.setString(
+      'subscription_url',
+      value.trim(),
+    );
   }
 
   // ==========================================================
-  // HTTP HEADERS
+  // HTTP HEADER
   // ==========================================================
 
   String? responseHeader(
@@ -258,9 +267,6 @@ class _HomePageState extends State<HomePage>
 
   // ==========================================================
   // SUBSCRIPTION USERINFO
-  //
-  // Standard:
-  // upload=...; download=...; total=...; expire=...
   // ==========================================================
 
   void readSubscriptionUserInfo(String? value) {
@@ -322,11 +328,13 @@ class _HomePageState extends State<HomePage>
     downloadBytes = downloadValue;
 
     if (uploadValue != null || downloadValue != null) {
-      usedBytes = (uploadValue ?? 0) + (downloadValue ?? 0);
+      usedBytes =
+          (uploadValue ?? 0) + (downloadValue ?? 0);
     }
 
     if (totalValue != null) {
-      totalBytes = totalValue == 0 ? null : totalValue;
+      totalBytes =
+          totalValue == 0 ? null : totalValue;
     }
 
     if (expireValue != null && expireValue > 0) {
@@ -334,28 +342,40 @@ class _HomePageState extends State<HomePage>
     }
   }
 
-  void readSubscriptionHeaders(Map<String, String> headers) {
+  void readSubscriptionHeaders(
+    Map<String, String> headers,
+  ) {
     final userInfo =
-        responseHeader(headers, 'subscription-userinfo');
+        responseHeader(
+      headers,
+      'subscription-userinfo',
+    );
 
     final title =
-        responseHeader(headers, 'profile-title');
+        responseHeader(
+      headers,
+      'profile-title',
+    );
 
     readSubscriptionUserInfo(userInfo);
 
-    if (title != null && title.trim().isNotEmpty) {
+    if (title != null &&
+        title.trim().isNotEmpty) {
       subscriptionTitle = title.trim();
     }
   }
 
   // ==========================================================
-  // BASE64 HELPERS
+  // BASE64
   // ==========================================================
 
   String _normalizeBase64(String input) {
     var value = input.trim();
 
-    value = value.replaceAll(RegExp(r'\s+'), '');
+    value = value.replaceAll(
+      RegExp(r'\s+'),
+      '',
+    );
 
     value = value.replaceAll('-', '+');
     value = value.replaceAll('_', '/');
@@ -369,13 +389,18 @@ class _HomePageState extends State<HomePage>
 
   String? decodeBase64(String input) {
     try {
-      final normalized = _normalizeBase64(input);
+      final normalized =
+          _normalizeBase64(input);
 
-      final bytes = base64.decode(normalized);
+      final bytes =
+          base64.decode(normalized);
 
-      final text = utf8.decode(bytes);
+      final text =
+          utf8.decode(bytes);
 
-      if (text.trim().isEmpty) return null;
+      if (text.trim().isEmpty) {
+        return null;
+      }
 
       return text;
     } catch (_) {
@@ -384,7 +409,8 @@ class _HomePageState extends State<HomePage>
   }
 
   bool looksLikeConfig(String text) {
-    final lower = text.trim().toLowerCase();
+    final lower =
+        text.trim().toLowerCase();
 
     return lower.startsWith('vless://') ||
         lower.startsWith('vmess://') ||
@@ -396,17 +422,12 @@ class _HomePageState extends State<HomePage>
   }
 
   // ==========================================================
-  // SUBSCRIPTION BODY DECODER
-  //
-  // Handles:
-  // 1. Plain share links
-  // 2. Whole Base64
-  // 3. URL-safe Base64
-  // 4. Mixed body containing direct links
-  // 5. One Base64 config per line
+  // SUBSCRIPTION DECODER
   // ==========================================================
 
-  List<String> decodeSubscription(String body) {
+  List<String> decodeSubscription(
+    String body,
+  ) {
     final result = <String>{};
 
     final cleaned = body.trim();
@@ -416,7 +437,7 @@ class _HomePageState extends State<HomePage>
     }
 
     // --------------------------------------------------------
-    // Direct links already present in body.
+    // Direct share links
     // --------------------------------------------------------
 
     final directRegex = RegExp(
@@ -424,24 +445,36 @@ class _HomePageState extends State<HomePage>
       caseSensitive: false,
     );
 
-    for (final match in directRegex.allMatches(cleaned)) {
-      var line = match.group(0)?.trim();
+    for (final match
+        in directRegex.allMatches(cleaned)) {
+      var line =
+          match.group(0)?.trim();
 
-      if (line == null || line.isEmpty) continue;
+      if (line == null ||
+          line.isEmpty) {
+        continue;
+      }
 
-      line = line.replaceAll(RegExp(r'[\r\n]+$'), '');
+      line = line.replaceAll(
+        RegExp(r'[\r\n]+$'),
+        '',
+      );
 
       result.add(line);
     }
 
     // --------------------------------------------------------
-    // Try entire response as Base64.
+    // Entire response Base64
     // --------------------------------------------------------
 
-    final decodedWhole = decodeBase64(cleaned);
+    final decodedWhole =
+        decodeBase64(cleaned);
 
     if (decodedWhole != null) {
-      for (final line in decodedWhole.split(RegExp(r'\r?\n'))) {
+      for (final line
+          in decodedWhole.split(
+        RegExp(r'\r?\n'),
+      )) {
         final value = line.trim();
 
         if (looksLikeConfig(value)) {
@@ -449,14 +482,17 @@ class _HomePageState extends State<HomePage>
         }
       }
 
-      // Sometimes decoded response is nested Base64.
+      // Nested Base64
       if (!looksLikeConfig(decodedWhole) &&
           decodedWhole.length > 20) {
-        final decodedAgain = decodeBase64(decodedWhole);
+        final decodedAgain =
+            decodeBase64(decodedWhole);
 
         if (decodedAgain != null) {
           for (final line
-              in decodedAgain.split(RegExp(r'\r?\n'))) {
+              in decodedAgain.split(
+            RegExp(r'\r?\n'),
+          )) {
             final value = line.trim();
 
             if (looksLikeConfig(value)) {
@@ -468,10 +504,13 @@ class _HomePageState extends State<HomePage>
     }
 
     // --------------------------------------------------------
-    // Each line may itself be Base64.
+    // Each line Base64
     // --------------------------------------------------------
 
-    for (final rawLine in cleaned.split(RegExp(r'\r?\n'))) {
+    for (final rawLine
+        in cleaned.split(
+      RegExp(r'\r?\n'),
+    )) {
       final line = rawLine.trim();
 
       if (line.isEmpty) continue;
@@ -481,12 +520,15 @@ class _HomePageState extends State<HomePage>
         continue;
       }
 
-      final decodedLine = decodeBase64(line);
+      final decodedLine =
+          decodeBase64(line);
 
       if (decodedLine == null) continue;
 
       for (final item
-          in decodedLine.split(RegExp(r'\r?\n'))) {
+          in decodedLine.split(
+        RegExp(r'\r?\n'),
+      )) {
         final value = item.trim();
 
         if (looksLikeConfig(value)) {
@@ -507,8 +549,11 @@ class _HomePageState extends State<HomePage>
   }) async {
     if (url.trim().isEmpty) {
       if (!silent) {
-        _showSnack('آدرس Subscription وارد نشده است');
+        _showSnack(
+          'آدرس Subscription وارد نشده است',
+        );
       }
+
       return;
     }
 
@@ -516,23 +561,30 @@ class _HomePageState extends State<HomePage>
 
     setStateSafe(() {
       loading = true;
-      stateText = 'در حال دریافت Subscription...';
+      stateText =
+          'در حال دریافت Subscription...';
     });
 
     try {
-      final uri = Uri.parse(url.trim());
+      final uri =
+          Uri.parse(url.trim());
 
       final response = await http
           .get(
             uri,
             headers: const {
-              'User-Agent': 'LightSpeed/3.0',
+              'User-Agent':
+                  'LightSpeed/3.0',
               'Accept': '*/*',
-              'Cache-Control': 'no-cache',
-              'Pragma': 'no-cache',
+              'Cache-Control':
+                  'no-cache',
+              'Pragma':
+                  'no-cache',
             },
           )
-          .timeout(const Duration(seconds: 60));
+          .timeout(
+        const Duration(seconds: 60),
+      );
 
       if (response.statusCode < 200 ||
           response.statusCode >= 300) {
@@ -541,7 +593,6 @@ class _HomePageState extends State<HomePage>
         );
       }
 
-      // Clear old metadata only after successful HTTP response.
       totalBytes = null;
       usedBytes = null;
       uploadBytes = null;
@@ -549,11 +600,14 @@ class _HomePageState extends State<HomePage>
       expireAt = null;
       subscriptionTitle = '';
 
-      readSubscriptionHeaders(response.headers);
+      readSubscriptionHeaders(
+        response.headers,
+      );
 
-      final body = response.body;
-
-      final links = decodeSubscription(body);
+      final links =
+          decodeSubscription(
+        response.body,
+      );
 
       if (links.isEmpty) {
         throw Exception(
@@ -565,7 +619,8 @@ class _HomePageState extends State<HomePage>
 
       for (final link in links) {
         try {
-          final server = parseServer(link);
+          final server =
+              parseServer(link);
 
           if (server != null) {
             parsed.add(server);
@@ -573,14 +628,15 @@ class _HomePageState extends State<HomePage>
         } catch (_) {}
       }
 
-      // Remove duplicate servers.
-      final unique = <String, Server>{};
+      final unique =
+          <String, Server>{};
 
       for (final server in parsed) {
         unique[server.raw] = server;
       }
 
-      servers = unique.values.toList();
+      servers =
+          unique.values.toList();
 
       if (servers.isEmpty) {
         throw Exception(
@@ -588,11 +644,14 @@ class _HomePageState extends State<HomePage>
         );
       }
 
+      selectedServerIndex = 0;
+
       await saveUrl(url);
 
       setStateSafe(() {
         stateText =
             '${servers.length} سرور دریافت شد';
+
         loading = false;
       });
 
@@ -605,12 +664,14 @@ class _HomePageState extends State<HomePage>
     } catch (e) {
       setStateSafe(() {
         loading = false;
-        stateText = 'خطا در دریافت Subscription';
+        stateText =
+            'خطا در دریافت Subscription';
       });
 
       if (!silent) {
         _showSnack(
-          'خطا در دریافت Subscription:\n${_cleanError(e)}',
+          'خطا در دریافت Subscription:\n'
+          '${_cleanError(e)}',
         );
       }
     }
@@ -621,56 +682,92 @@ class _HomePageState extends State<HomePage>
   // ==========================================================
 
   Server? parseServer(String raw) {
-    final uri = Uri.tryParse(raw.trim());
+    final uri =
+        Uri.tryParse(raw.trim());
 
-    if (uri == null || uri.scheme.isEmpty) {
+    if (uri == null ||
+        uri.scheme.isEmpty) {
       return null;
     }
 
-    switch (uri.scheme.toLowerCase()) {
+    switch (
+        uri.scheme.toLowerCase()) {
       case 'vless':
-        return parseVless(raw, uri);
+        return parseVless(
+          raw,
+          uri,
+        );
 
       case 'vmess':
-        return parseVmess(raw, uri);
+        return parseVmess(
+          raw,
+          uri,
+        );
 
       case 'trojan':
-        return parseTrojan(raw, uri);
+        return parseTrojan(
+          raw,
+          uri,
+        );
 
       case 'ss':
-        return parseShadowsocks(raw, uri);
+        return parseShadowsocks(
+          raw,
+          uri,
+        );
 
       case 'hysteria2':
       case 'hy2':
-        return parseHysteria2(raw, uri);
+        return parseHysteria2(
+          raw,
+          uri,
+        );
 
       case 'tuic':
-        return parseTuic(raw, uri);
+        return parseTuic(
+          raw,
+          uri,
+        );
     }
 
     return null;
   }
 
-  String displayName(Uri uri, String fallback) {
-    final fragment = uri.fragment.trim();
+  String displayName(
+    Uri uri,
+    String fallback,
+  ) {
+    final fragment =
+        uri.fragment.trim();
 
     if (fragment.isNotEmpty) {
-      return Uri.decodeComponent(fragment);
+      try {
+        return Uri.decodeComponent(
+          fragment,
+        );
+      } catch (_) {
+        return fragment;
+      }
     }
 
     return fallback;
   }
 
-  Map<String, dynamic> parseCommonTransport(
+  Map<String, dynamic>
+      parseCommonTransport(
     Uri uri,
   ) {
-    final query = uri.queryParameters;
+    final query =
+        uri.queryParameters;
 
     final network =
-        (query['type'] ?? query['network'] ?? 'tcp')
+        (query['type'] ??
+                query['network'] ??
+                'tcp')
             .toLowerCase();
 
-    final outbound = <String, dynamic>{
+    final outbound =
+        <String, dynamic>{
       'type': '',
       'server': uri.host,
       'server_port': uri.port,
@@ -690,7 +787,8 @@ class _HomePageState extends State<HomePage>
     Uri uri,
     String network,
   ) {
-    final query = uri.queryParameters;
+    final query =
+        uri.queryParameters;
 
     if (network == 'ws') {
       outbound['transport'] = {
@@ -707,10 +805,11 @@ class _HomePageState extends State<HomePage>
         'type': 'grpc',
         'service_name':
             query['serviceName'] ??
-            query['service_name'] ??
-            '',
+                query['service_name'] ??
+                '',
       };
-    } else if (network == 'httpupgrade') {
+    } else if (network ==
+        'httpupgrade') {
       outbound['transport'] = {
         'type': 'httpupgrade',
         if (query['path'] != null)
@@ -730,55 +829,78 @@ class _HomePageState extends State<HomePage>
     }
 
     final security =
-        (query['security'] ?? '').toLowerCase();
+        (query['security'] ?? '')
+            .toLowerCase();
 
     if (security == 'tls') {
       outbound['tls'] = {
         'enabled': true,
         if (query['sni'] != null)
-          'server_name': query['sni'],
+          'server_name':
+              query['sni'],
         if (query['fp'] != null)
           'utls': {
             'enabled': true,
-            'fingerprint': query['fp'],
+            'fingerprint':
+                query['fp'],
           },
       };
     }
 
     if (security == 'reality') {
+      final reality =
+          <String, dynamic>{
+        'enabled': true,
+      };
+
+      if (query['pbk'] != null) {
+        reality['public_key'] =
+            query['pbk'];
+      }
+
+      if (query['publicKey'] != null) {
+        reality['public_key'] =
+            query['publicKey'];
+      }
+
+      if (query['sid'] != null) {
+        reality['short_id'] =
+            query['sid'];
+      }
+
+      if (query['shortId'] != null) {
+        reality['short_id'] =
+            query['shortId'];
+      }
+
       outbound['tls'] = {
         'enabled': true,
         if (query['sni'] != null)
-          'server_name': query['sni'],
+          'server_name':
+              query['sni'],
         if (query['fp'] != null)
           'utls': {
             'enabled': true,
-            'fingerprint': query['fp'],
+            'fingerprint':
+                query['fp'],
           },
-        'reality': {
-          'enabled': true,
-          if (query['pbk'] != null)
-            'public_key': query['pbk'],
-          if (query['publicKey'] != null)
-            'public_key': query['publicKey'],
-          if (query['sid'] != null)
-            'short_id': query['sid'],
-          if (query['shortId'] != null)
-            'short_id': query['shortId'],
-        },
+        'reality': reality,
       };
     }
   }
 
-  // ----------------------------------------------------------
+  // ==========================================================
   // VLESS
-  // ----------------------------------------------------------
+  // ==========================================================
 
   Server? parseVless(
     String raw,
     Uri uri,
   ) {
-    final uuid = Uri.decodeComponent(uri.userInfo);
+    final uuid =
+        Uri.decodeComponent(
+      uri.userInfo,
+    );
 
     if (uuid.isEmpty ||
         uri.host.isEmpty ||
@@ -791,17 +913,21 @@ class _HomePageState extends State<HomePage>
 
     outbound['type'] = 'vless';
     outbound['uuid'] = uuid;
-    outbound['packet_encoding'] = 'xray';
 
-    final flow = uri.queryParameters['flow'];
+    final flow =
+        uri.queryParameters['flow'];
 
-    if (flow != null && flow.isNotEmpty) {
+    if (flow != null &&
+        flow.isNotEmpty) {
       outbound['flow'] = flow;
     }
 
     return Server(
       raw: raw,
-      name: displayName(uri, 'VLESS'),
+      name: displayName(
+        uri,
+        'VLESS',
+      ),
       type: 'vless',
       host: uri.host,
       port: uri.port,
@@ -809,34 +935,45 @@ class _HomePageState extends State<HomePage>
     );
   }
 
-  // ----------------------------------------------------------
+  // ==========================================================
   // VMESS
-  // ----------------------------------------------------------
+  // ==========================================================
 
   Server? parseVmess(
     String raw,
     Uri uri,
   ) {
-    var encoded = raw.substring('vmess://'.length);
+    var encoded =
+        raw.substring(
+      'vmess://'.length,
+    );
 
     encoded = encoded.trim();
 
-    final jsonText = decodeBase64(encoded);
+    final jsonText =
+        decodeBase64(encoded);
 
-    if (jsonText == null) return null;
+    if (jsonText == null) {
+      return null;
+    }
 
     dynamic decoded;
 
     try {
-      decoded = jsonDecode(jsonText);
+      decoded =
+          jsonDecode(jsonText);
     } catch (_) {
       return null;
     }
 
-    if (decoded is! Map) return null;
+    if (decoded is! Map) {
+      return null;
+    }
 
     final map =
-        Map<String, dynamic>.from(decoded);
+        Map<String, dynamic>.from(
+      decoded,
+    );
 
     final address =
         '${map['add'] ?? map['address'] ?? ''}';
@@ -856,7 +993,8 @@ class _HomePageState extends State<HomePage>
       return null;
     }
 
-    final outbound = <String, dynamic>{
+    final outbound =
+        <String, dynamic>{
       'type': 'vmess',
       'server': address,
       'server_port': port,
@@ -866,10 +1004,14 @@ class _HomePageState extends State<HomePage>
     };
 
     final network =
-        '${map['net'] ?? 'tcp'}'.toLowerCase();
+        '${map['net'] ?? 'tcp'}'
+            .toLowerCase();
 
-    final path = '${map['path'] ?? ''}';
-    final host = '${map['host'] ?? ''}';
+    final path =
+        '${map['path'] ?? ''}';
+
+    final host =
+        '${map['host'] ?? ''}';
 
     if (network == 'ws') {
       outbound['transport'] = {
@@ -887,16 +1029,32 @@ class _HomePageState extends State<HomePage>
         'service_name':
             '${map['path'] ?? map['serviceName'] ?? ''}',
       };
+    } else if (network ==
+            'httpupgrade' ||
+        network == 'http') {
+      outbound['transport'] = {
+        'type':
+            network == 'httpupgrade'
+                ? 'httpupgrade'
+                : 'http',
+        if (path.isNotEmpty)
+          'path': path,
+        if (host.isNotEmpty)
+          'host': host,
+      };
     }
 
     final tls =
-        '${map['tls'] ?? ''}'.toLowerCase();
+        '${map['tls'] ?? ''}'
+            .toLowerCase();
 
     if (tls == 'tls') {
       outbound['tls'] = {
         'enabled': true,
-        if ('${map['sni'] ?? ''}'.isNotEmpty)
-          'server_name': '${map['sni']}',
+        if ('${map['sni'] ?? ''}'
+            .isNotEmpty)
+          'server_name':
+              '${map['sni']}',
       };
     }
 
@@ -913,16 +1071,18 @@ class _HomePageState extends State<HomePage>
     );
   }
 
-  // ----------------------------------------------------------
+  // ==========================================================
   // TROJAN
-  // ----------------------------------------------------------
+  // ==========================================================
 
   Server? parseTrojan(
     String raw,
     Uri uri,
   ) {
     final password =
-        Uri.decodeComponent(uri.userInfo);
+        Uri.decodeComponent(
+      uri.userInfo,
+    );
 
     if (password.isEmpty ||
         uri.host.isEmpty ||
@@ -934,11 +1094,15 @@ class _HomePageState extends State<HomePage>
         parseCommonTransport(uri);
 
     outbound['type'] = 'trojan';
-    outbound['password'] = password;
+    outbound['password'] =
+        password;
 
     return Server(
       raw: raw,
-      name: displayName(uri, 'Trojan'),
+      name: displayName(
+        uri,
+        'Trojan',
+      ),
       type: 'trojan',
       host: uri.host,
       port: uri.port,
@@ -946,19 +1110,22 @@ class _HomePageState extends State<HomePage>
     );
   }
 
-  // ----------------------------------------------------------
+  // ==========================================================
   // SHADOWSOCKS
-  // ----------------------------------------------------------
+  // ==========================================================
 
   Server? parseShadowsocks(
     String raw,
     Uri uri,
   ) {
     var userInfo =
-        Uri.decodeComponent(uri.userInfo);
+        Uri.decodeComponent(
+      uri.userInfo,
+    );
 
     if (!userInfo.contains(':')) {
-      final decoded = decodeBase64(userInfo);
+      final decoded =
+          decodeBase64(userInfo);
 
       if (decoded != null &&
           decoded.contains(':')) {
@@ -966,7 +1133,8 @@ class _HomePageState extends State<HomePage>
       }
     }
 
-    final split = userInfo.split(':');
+    final split =
+        userInfo.split(':');
 
     if (split.length < 2 ||
         uri.host.isEmpty ||
@@ -984,7 +1152,8 @@ class _HomePageState extends State<HomePage>
       return null;
     }
 
-    final outbound = <String, dynamic>{
+    final outbound =
+        <String, dynamic>{
       'type': 'shadowsocks',
       'server': uri.host,
       'server_port': uri.port,
@@ -994,7 +1163,10 @@ class _HomePageState extends State<HomePage>
 
     return Server(
       raw: raw,
-      name: displayName(uri, 'Shadowsocks'),
+      name: displayName(
+        uri,
+        'Shadowsocks',
+      ),
       type: 'shadowsocks',
       host: uri.host,
       port: uri.port,
@@ -1002,16 +1174,18 @@ class _HomePageState extends State<HomePage>
     );
   }
 
-  // ----------------------------------------------------------
+  // ==========================================================
   // HYSTERIA2
-  // ----------------------------------------------------------
+  // ==========================================================
 
   Server? parseHysteria2(
     String raw,
     Uri uri,
   ) {
     final password =
-        Uri.decodeComponent(uri.userInfo);
+        Uri.decodeComponent(
+      uri.userInfo,
+    );
 
     if (password.isEmpty ||
         uri.host.isEmpty ||
@@ -1019,25 +1193,35 @@ class _HomePageState extends State<HomePage>
       return null;
     }
 
-    final outbound = <String, dynamic>{
+    final query =
+        uri.queryParameters;
+
+    final tls =
+        <String, dynamic>{
+      'enabled': true,
+    };
+
+    if (query['sni'] != null &&
+        query['sni']!.isNotEmpty) {
+      tls['server_name'] =
+          query['sni'];
+    }
+
+    final outbound =
+        <String, dynamic>{
       'type': 'hysteria2',
       'server': uri.host,
       'server_port': uri.port,
       'password': password,
+      'tls': tls,
     };
-
-    final query = uri.queryParameters;
-
-    if (query['sni'] != null) {
-      outbound['tls'] = {
-        'enabled': true,
-        'server_name': query['sni'],
-      };
-    }
 
     return Server(
       raw: raw,
-      name: displayName(uri, 'Hysteria2'),
+      name: displayName(
+        uri,
+        'Hysteria2',
+      ),
       type: 'hysteria2',
       host: uri.host,
       port: uri.port,
@@ -1045,18 +1229,21 @@ class _HomePageState extends State<HomePage>
     );
   }
 
-  // ----------------------------------------------------------
+  // ==========================================================
   // TUIC
-  // ----------------------------------------------------------
+  // ==========================================================
 
   Server? parseTuic(
     String raw,
     Uri uri,
   ) {
     final userInfo =
-        Uri.decodeComponent(uri.userInfo);
+        Uri.decodeComponent(
+      uri.userInfo,
+    );
 
-    final split = userInfo.split(':');
+    final split =
+        userInfo.split(':');
 
     if (split.length < 2 ||
         uri.host.isEmpty ||
@@ -1065,6 +1252,7 @@ class _HomePageState extends State<HomePage>
     }
 
     final uuid = split[0];
+
     final password =
         split.sublist(1).join(':');
 
@@ -1073,28 +1261,37 @@ class _HomePageState extends State<HomePage>
       return null;
     }
 
-    final outbound = <String, dynamic>{
+    final tls =
+        <String, dynamic>{
+      'enabled': true,
+    };
+
+    final query =
+        uri.queryParameters;
+
+    if (query['sni'] != null &&
+        query['sni']!.isNotEmpty) {
+      tls['server_name'] =
+          query['sni'];
+    }
+
+    final outbound =
+        <String, dynamic>{
       'type': 'tuic',
       'server': uri.host,
       'server_port': uri.port,
       'uuid': uuid,
       'password': password,
       'congestion_control': 'cubic',
-      'tls': {
-        'enabled': true,
-      },
+      'tls': tls,
     };
-
-    final query = uri.queryParameters;
-
-    if (query['sni'] != null) {
-      outbound['tls']['server_name'] =
-          query['sni'];
-    }
 
     return Server(
       raw: raw,
-      name: displayName(uri, 'TUIC'),
+      name: displayName(
+        uri,
+        'TUIC',
+      ),
       type: 'tuic',
       host: uri.host,
       port: uri.port,
@@ -1106,14 +1303,21 @@ class _HomePageState extends State<HomePage>
   // PING
   // ==========================================================
 
-  Future<int?> pingServer(Server server) async {
-    final stopwatch = Stopwatch()..start();
+  Future<int?> pingServer(
+    Server server,
+  ) async {
+    final stopwatch =
+        Stopwatch()..start();
 
     try {
-      final socket = await Socket.connect(
+      final socket =
+          await Socket.connect(
         server.host,
         server.port,
-        timeout: const Duration(seconds: 4),
+        timeout:
+            const Duration(
+          seconds: 4,
+        ),
       );
 
       stopwatch.stop();
@@ -1136,12 +1340,18 @@ class _HomePageState extends State<HomePage>
       testing = true;
 
       if (!silent) {
-        stateText = 'در حال تست سرورها...';
+        stateText =
+            'در حال تست سرورها...';
       }
     });
 
-    for (int i = 0; i < servers.length; i++) {
-      final ping = await pingServer(servers[i]);
+    for (int i = 0;
+        i < servers.length;
+        i++) {
+      final ping =
+          await pingServer(
+        servers[i],
+      );
 
       servers[i].ping = ping;
 
@@ -1154,7 +1364,8 @@ class _HomePageState extends State<HomePage>
       testing = false;
 
       if (!silent) {
-        stateText = 'تست سرورها انجام شد';
+        stateText =
+            'تست سرورها انجام شد';
       }
     });
   }
@@ -1180,8 +1391,11 @@ class _HomePageState extends State<HomePage>
   // SING-BOX CONFIG
   // ==========================================================
 
-  String makeConfig(Server selected) {
-    final config = <String, dynamic>{
+  String makeConfig(
+    Server selected,
+  ) {
+    final config =
+        <String, dynamic>{
       'log': {
         'level': 'warn',
       },
@@ -1204,10 +1418,17 @@ class _HomePageState extends State<HomePage>
         {
           'type': 'tun',
           'tag': 'tun-in',
-          'interface_name': 'light-speed',
-          'inet4_address': '172.19.0.1/30',
+
+          // استاندارد sing-box TUN address
+          'address': [
+            '172.19.0.1/30',
+          ],
+
           'auto_route': true,
-          'strict_route': false,
+
+          // strict_route حذف شد
+          // تا روی Android مشکل checkConfig ایجاد نکند.
+
           'stack': 'system',
         },
       ],
@@ -1269,23 +1490,24 @@ class _HomePageState extends State<HomePage>
 
     setStateSafe(() {
       connecting = true;
-      stateText = 'آماده‌سازی اتصال...';
+      stateText =
+          'آماده‌سازی اتصال...';
       lastFault = '';
     });
 
     try {
       Server? chosen;
 
-      // ------------------------------------------------------
-      // FASTEST SERVER
-      // ------------------------------------------------------
-
       if (autoSelectFastest) {
         chosen = fastestServer();
 
         if (chosen == null) {
-          await testAll(silent: true);
-          chosen = fastestServer();
+          await testAll(
+            silent: true,
+          );
+
+          chosen =
+              fastestServer();
         }
 
         if (chosen == null) {
@@ -1295,11 +1517,13 @@ class _HomePageState extends State<HomePage>
         }
       } else {
         if (selectedServerIndex < 0 ||
-            selectedServerIndex >= servers.length) {
+            selectedServerIndex >=
+                servers.length) {
           selectedServerIndex = 0;
         }
 
-        chosen = servers[selectedServerIndex];
+        chosen =
+            servers[selectedServerIndex];
       }
 
       setStateSafe(() {
@@ -1307,11 +1531,8 @@ class _HomePageState extends State<HomePage>
             'در حال اتصال به ${chosen!.name}...';
       });
 
-      final config = makeConfig(chosen);
-
-      // ------------------------------------------------------
-      // VPN PERMISSION
-      // ------------------------------------------------------
+      final config =
+          makeConfig(chosen);
 
       final permission =
           await vpn.requestVPNPermission();
@@ -1322,30 +1543,31 @@ class _HomePageState extends State<HomePage>
         );
       }
 
-      // ------------------------------------------------------
-      // VALIDATE
-      // ------------------------------------------------------
-
-      await vpn.checkConfig(config);
-
-      // ------------------------------------------------------
-      // CONNECT
-      // ------------------------------------------------------
+      await vpn.checkConfig(
+        config,
+      );
 
       await vpn.connect(
         SessionOptions(
           config: config,
-          networkMode: NetworkMode.vpn,
-          notification: NotificationConfig(
-            title: 'Light speed 🔥',
-            showTrafficStats: true,
-            showStopButton: true,
-            stopButtonLabel: 'قطع اتصال',
+          networkMode:
+              NetworkMode.vpn,
+          notification:
+              NotificationConfig(
+            title:
+                'Light speed 🔥',
+            showTrafficStats:
+                true,
+            showStopButton:
+                true,
+            stopButtonLabel:
+                'قطع اتصال',
           ),
         ),
       );
 
-      connectedAt = DateTime.now();
+      connectedAt =
+          DateTime.now();
 
       setStateSafe(() {
         connected = true;
@@ -1357,12 +1579,15 @@ class _HomePageState extends State<HomePage>
       setStateSafe(() {
         connected = false;
         connecting = false;
-        stateText = 'اتصال ناموفق';
-        lastFault = _cleanError(e);
+        stateText =
+            'اتصال ناموفق';
+        lastFault =
+            _cleanError(e);
       });
 
       _showSnack(
-        'اتصال برقرار نشد:\n${_cleanError(e)}',
+        'اتصال برقرار نشد:\n'
+        '${_cleanError(e)}',
       );
     }
   }
@@ -1383,20 +1608,29 @@ class _HomePageState extends State<HomePage>
   // HELPERS
   // ==========================================================
 
-  void setStateSafe(VoidCallback callback) {
+  void setStateSafe(
+    VoidCallback callback,
+  ) {
     if (!mounted) return;
 
     setState(callback);
   }
 
-  String _cleanError(Object error) {
+  String _cleanError(
+    Object error,
+  ) {
     return error
         .toString()
-        .replaceFirst('Exception: ', '')
+        .replaceFirst(
+          'Exception: ',
+          '',
+        )
         .trim();
   }
 
-  void _showSnack(String text) {
+  void _showSnack(
+    String text,
+  ) {
     if (!mounted) return;
 
     ScaffoldMessenger.of(context)
@@ -1405,36 +1639,54 @@ class _HomePageState extends State<HomePage>
         SnackBar(
           content: Text(
             text,
-            textDirection: TextDirection.rtl,
+            textDirection:
+                TextDirection.rtl,
           ),
-          duration: const Duration(seconds: 4),
+          duration:
+              const Duration(
+            seconds: 4,
+          ),
         ),
       );
   }
 
-  String formatBytes(int? bytes) {
-    if (bytes == null) return 'نامشخص';
+  String formatBytes(
+    int? bytes,
+  ) {
+    if (bytes == null) {
+      return 'نامشخص';
+    }
 
     if (bytes < 1024) {
       return '$bytes B';
     }
 
-    if (bytes < 1024 * 1024) {
+    if (bytes <
+        1024 * 1024) {
       return '${(bytes / 1024).toStringAsFixed(1)} KB';
     }
 
-    if (bytes < 1024 * 1024 * 1024) {
+    if (bytes <
+        1024 *
+            1024 *
+            1024) {
       return '${(bytes / (1024 * 1024)).toStringAsFixed(2)} MB';
     }
 
-    if (bytes < 1024 * 1024 * 1024 * 1024) {
+    if (bytes <
+        1024 *
+            1024 *
+            1024 *
+            1024) {
       return '${(bytes / (1024 * 1024 * 1024)).toStringAsFixed(2)} GB';
     }
 
     return '${(bytes / (1024 * 1024 * 1024 * 1024)).toStringAsFixed(2)} TB';
   }
 
-  String formatSpeed(int bitsPerSecond) {
+  String formatSpeed(
+    int bitsPerSecond,
+  ) {
     final bytesPerSecond =
         bitsPerSecond / 8;
 
@@ -1442,11 +1694,15 @@ class _HomePageState extends State<HomePage>
       return '${bytesPerSecond.toStringAsFixed(0)} B/s';
     }
 
-    if (bytesPerSecond < 1024 * 1024) {
+    if (bytesPerSecond <
+        1024 * 1024) {
       return '${(bytesPerSecond / 1024).toStringAsFixed(1)} KB/s';
     }
 
-    if (bytesPerSecond < 1024 * 1024 * 1024) {
+    if (bytesPerSecond <
+        1024 *
+            1024 *
+            1024) {
       return '${(bytesPerSecond / (1024 * 1024)).toStringAsFixed(2)} MB/s';
     }
 
@@ -1463,7 +1719,9 @@ class _HomePageState extends State<HomePage>
       expireAt! * 1000,
     );
 
-    return '${date.year}/${date.month.toString().padLeft(2, '0')}/${date.day.toString().padLeft(2, '0')}';
+    return '${date.year}/'
+        '${date.month.toString().padLeft(2, '0')}/'
+        '${date.day.toString().padLeft(2, '0')}';
   }
 
   String remainingTimeText() {
@@ -1477,15 +1735,20 @@ class _HomePageState extends State<HomePage>
     );
 
     final difference =
-        expire.difference(DateTime.now());
+        expire.difference(
+      DateTime.now(),
+    );
 
     if (difference.isNegative) {
       return 'منقضی شده';
     }
 
-    final days = difference.inDays;
+    final days =
+        difference.inDays;
+
     final hours =
-        difference.inHours.remainder(24);
+        difference.inHours
+            .remainder(24);
 
     return '$days روز و $hours ساعت';
   }
@@ -1495,7 +1758,8 @@ class _HomePageState extends State<HomePage>
       return null;
     }
 
-    final used = usedBytes ?? 0;
+    final used =
+        usedBytes ?? 0;
 
     if (totalBytes! <= used) {
       return 0;
@@ -1505,7 +1769,7 @@ class _HomePageState extends State<HomePage>
   }
 
   // ==========================================================
-  // UI COMPONENTS
+  // UI CARD
   // ==========================================================
 
   Widget card({
@@ -1516,11 +1780,17 @@ class _HomePageState extends State<HomePage>
     return Container(
       width: double.infinity,
       padding: padding,
-      decoration: BoxDecoration(
-        color: const Color(0xFF0D1A2D),
-        borderRadius: BorderRadius.circular(20),
+      decoration:
+          BoxDecoration(
+        color:
+            const Color(0xFF0D1A2D),
+        borderRadius:
+            BorderRadius.circular(20),
         border: Border.all(
-          color: Colors.white.withOpacity(.06),
+          color: Colors.white
+              .withValues(
+            alpha: .06,
+          ),
         ),
       ),
       child: child,
@@ -1534,30 +1804,41 @@ class _HomePageState extends State<HomePage>
   ) {
     return Expanded(
       child: card(
-        padding: const EdgeInsets.all(14),
+        padding:
+            const EdgeInsets.all(14),
         child: Column(
           crossAxisAlignment:
               CrossAxisAlignment.start,
           children: [
             Icon(
               icon,
-              color: const Color(0xFF00D4FF),
+              color:
+                  const Color(0xFF00D4FF),
               size: 22,
             ),
-            const SizedBox(height: 10),
+            const SizedBox(
+              height: 10,
+            ),
             Text(
               title,
               style: TextStyle(
-                color: Colors.white.withOpacity(.55),
+                color: Colors.white
+                    .withValues(
+                  alpha: .55,
+                ),
                 fontSize: 12,
               ),
             ),
-            const SizedBox(height: 4),
+            const SizedBox(
+              height: 4,
+            ),
             Text(
               value,
-              style: const TextStyle(
+              style:
+                  const TextStyle(
                 fontSize: 15,
-                fontWeight: FontWeight.bold,
+                fontWeight:
+                    FontWeight.bold,
               ),
             ),
           ],
@@ -1571,15 +1852,19 @@ class _HomePageState extends State<HomePage>
   // ==========================================================
 
   Widget homePage() {
-    final fastest = fastestServer();
+    final fastest =
+        fastestServer();
 
     return RefreshIndicator(
       onRefresh: () =>
           loadSubscription(),
       child: ListView(
-        padding: const EdgeInsets.all(16),
+        padding:
+            const EdgeInsets.all(16),
         children: [
-          const SizedBox(height: 12),
+          const SizedBox(
+            height: 12,
+          ),
 
           Center(
             child: Column(
@@ -1588,15 +1873,19 @@ class _HomePageState extends State<HomePage>
                   'Light speed 🔥',
                   style: TextStyle(
                     fontSize: 30,
-                    fontWeight: FontWeight.w900,
+                    fontWeight:
+                        FontWeight.w900,
                   ),
                 ),
-                const SizedBox(height: 5),
+                const SizedBox(
+                  height: 5,
+                ),
                 Text(
                   stateText,
                   style: TextStyle(
                     color: connected
-                        ? Colors.greenAccent
+                        ? Colors
+                            .greenAccent
                         : Colors.white54,
                   ),
                 ),
@@ -1604,37 +1893,60 @@ class _HomePageState extends State<HomePage>
             ),
           ),
 
-          const SizedBox(height: 28),
+          const SizedBox(
+            height: 28,
+          ),
 
           Center(
             child: GestureDetector(
-              onTap: connecting
-                  ? null
-                  : connect,
-              child: AnimatedContainer(
+              onTap:
+                  connecting
+                      ? null
+                      : connect,
+              child:
+                  AnimatedContainer(
                 duration:
-                    const Duration(milliseconds: 250),
+                    const Duration(
+                  milliseconds: 250,
+                ),
                 width: 190,
                 height: 190,
-                decoration: BoxDecoration(
-                  shape: BoxShape.circle,
+                decoration:
+                    BoxDecoration(
+                  shape:
+                      BoxShape.circle,
                   color: connected
-                      ? Colors.green.withOpacity(.16)
-                      : const Color(0xFF00D4FF)
-                          .withOpacity(.10),
-                  border: Border.all(
+                      ? Colors.green
+                          .withValues(
+                          alpha: .16,
+                        )
+                      : const Color(
+                          0xFF00D4FF,
+                        ).withValues(
+                          alpha: .10,
+                        ),
+                  border:
+                      Border.all(
                     color: connected
-                        ? Colors.greenAccent
-                        : const Color(0xFF00D4FF),
+                        ? Colors
+                            .greenAccent
+                        : const Color(
+                            0xFF00D4FF,
+                          ),
                     width: 2,
                   ),
                   boxShadow: [
                     BoxShadow(
                       color: connected
                           ? Colors.green
-                              .withOpacity(.16)
-                          : const Color(0xFF00D4FF)
-                              .withOpacity(.14),
+                              .withValues(
+                              alpha: .16,
+                            )
+                          : const Color(
+                              0xFF00D4FF,
+                            ).withValues(
+                              alpha: .14,
+                            ),
                       blurRadius: 35,
                       spreadRadius: 5,
                     ),
@@ -1642,27 +1954,36 @@ class _HomePageState extends State<HomePage>
                 ),
                 child: Column(
                   mainAxisAlignment:
-                      MainAxisAlignment.center,
+                      MainAxisAlignment
+                          .center,
                   children: [
                     Icon(
                       connected
                           ? Icons.power
-                          : Icons.power_settings_new,
+                          : Icons
+                              .power_settings_new,
                       size: 62,
                       color: connected
-                          ? Colors.greenAccent
-                          : const Color(0xFF00D4FF),
+                          ? Colors
+                              .greenAccent
+                          : const Color(
+                              0xFF00D4FF,
+                            ),
                     ),
-                    const SizedBox(height: 10),
+                    const SizedBox(
+                      height: 10,
+                    ),
                     Text(
                       connecting
                           ? 'در حال اتصال'
                           : connected
                               ? 'قطع اتصال'
                               : 'اتصال',
-                      style: const TextStyle(
+                      style:
+                          const TextStyle(
                         fontSize: 17,
-                        fontWeight: FontWeight.bold,
+                        fontWeight:
+                            FontWeight.bold,
                       ),
                     ),
                   ],
@@ -1671,25 +1992,35 @@ class _HomePageState extends State<HomePage>
             ),
           ),
 
-          const SizedBox(height: 28),
+          const SizedBox(
+            height: 28,
+          ),
 
           Row(
             children: [
               statCard(
                 'دانلود',
-                formatSpeed(download),
+                formatSpeed(
+                  download,
+                ),
                 Icons.download,
               ),
-              const SizedBox(width: 10),
+              const SizedBox(
+                width: 10,
+              ),
               statCard(
                 'آپلود',
-                formatSpeed(upload),
+                formatSpeed(
+                  upload,
+                ),
                 Icons.upload,
               ),
             ],
           ),
 
-          const SizedBox(height: 12),
+          const SizedBox(
+            height: 12,
+          ),
 
           card(
             child: Column(
@@ -1698,31 +2029,40 @@ class _HomePageState extends State<HomePage>
                   children: [
                     const Icon(
                       Icons.speed,
-                      color: Color(0xFF00D4FF),
+                      color:
+                          Color(0xFF00D4FF),
                     ),
-                    const SizedBox(width: 10),
+                    const SizedBox(
+                      width: 10,
+                    ),
                     const Expanded(
                       child: Text(
                         'سریع‌ترین سرور',
-                        style: TextStyle(
+                        style:
+                            TextStyle(
                           fontWeight:
                               FontWeight.bold,
                         ),
                       ),
                     ),
                     Text(
-                      fastest?.ping != null
+                      fastest?.ping !=
+                              null
                           ? '${fastest!.ping} ms'
                           : '---',
-                      style: const TextStyle(
-                        color: Colors.greenAccent,
+                      style:
+                          const TextStyle(
+                        color:
+                            Colors.greenAccent,
                         fontWeight:
                             FontWeight.bold,
                       ),
                     ),
                   ],
                 ),
-                const SizedBox(height: 10),
+                const SizedBox(
+                  height: 10,
+                ),
                 Align(
                   alignment:
                       Alignment.centerRight,
@@ -1731,8 +2071,10 @@ class _HomePageState extends State<HomePage>
                         'هنوز تست نشده',
                     textDirection:
                         TextDirection.rtl,
-                    style: const TextStyle(
-                      color: Colors.white70,
+                    style:
+                        const TextStyle(
+                      color:
+                          Colors.white70,
                     ),
                   ),
                 ),
@@ -1740,22 +2082,30 @@ class _HomePageState extends State<HomePage>
             ),
           ),
 
-          const SizedBox(height: 12),
+          const SizedBox(
+            height: 12,
+          ),
 
           card(
             child: Column(
               children: [
                 _infoRow(
                   'حجم کل',
-                  formatBytes(totalBytes),
+                  formatBytes(
+                    totalBytes,
+                  ),
                 ),
                 _infoRow(
                   'مصرف شده',
-                  formatBytes(usedBytes),
+                  formatBytes(
+                    usedBytes,
+                  ),
                 ),
                 _infoRow(
                   'باقی‌مانده',
-                  formatBytes(remainingBytes()),
+                  formatBytes(
+                    remainingBytes(),
+                  ),
                 ),
                 _infoRow(
                   'انقضا',
@@ -1769,11 +2119,15 @@ class _HomePageState extends State<HomePage>
             ),
           ),
 
-          const SizedBox(height: 12),
+          const SizedBox(
+            height: 12,
+          ),
 
           OutlinedButton.icon(
             onPressed:
-                loading ? null : loadSubscription,
+                loading
+                    ? null
+                    : loadSubscription,
             icon: loading
                 ? const SizedBox(
                     width: 18,
@@ -1783,7 +2137,9 @@ class _HomePageState extends State<HomePage>
                       strokeWidth: 2,
                     ),
                   )
-                : const Icon(Icons.refresh),
+                : const Icon(
+                    Icons.refresh,
+                  ),
             label: const Text(
               'به‌روزرسانی Subscription',
             ),
@@ -1799,12 +2155,15 @@ class _HomePageState extends State<HomePage>
   ) {
     return Padding(
       padding:
-          const EdgeInsets.symmetric(vertical: 8),
+          const EdgeInsets.symmetric(
+        vertical: 8,
+      ),
       child: Row(
         children: [
           Text(
             title,
-            style: const TextStyle(
+            style:
+                const TextStyle(
               color: Colors.white54,
             ),
           ),
@@ -1812,9 +2171,12 @@ class _HomePageState extends State<HomePage>
           Flexible(
             child: Text(
               value,
-              textAlign: TextAlign.end,
-              style: const TextStyle(
-                fontWeight: FontWeight.bold,
+              textAlign:
+                  TextAlign.end,
+              style:
+                  const TextStyle(
+                fontWeight:
+                    FontWeight.bold,
               ),
             ),
           ),
@@ -1829,60 +2191,94 @@ class _HomePageState extends State<HomePage>
 
   Widget serversPage() {
     return ListView(
-      padding: const EdgeInsets.all(16),
+      padding:
+          const EdgeInsets.all(16),
       children: [
         card(
-          child: SwitchListTile(
-            contentPadding: EdgeInsets.zero,
-            value: autoSelectFastest,
+          child:
+              SwitchListTile(
+            contentPadding:
+                EdgeInsets.zero,
+            value:
+                autoSelectFastest,
             onChanged: (value) {
               setState(() {
-                autoSelectFastest = value;
+                autoSelectFastest =
+                    value;
               });
             },
-            title: const Text(
+            title:
+                const Text(
               'انتخاب خودکار سریع‌ترین سرور',
             ),
-            subtitle: const Text(
+            subtitle:
+                const Text(
               'قبل از اتصال، کمترین Ping انتخاب می‌شود',
             ),
           ),
         ),
 
-        const SizedBox(height: 12),
+        const SizedBox(
+          height: 12,
+        ),
 
         Row(
           children: [
             Expanded(
-              child: OutlinedButton.icon(
+              child:
+                  OutlinedButton.icon(
                 onPressed: testing
                     ? null
-                    : () => testAll(),
-                icon: const Icon(Icons.speed),
-                label: const Text('تست Ping'),
+                    : () =>
+                        testAll(),
+                icon:
+                    const Icon(
+                  Icons.speed,
+                ),
+                label:
+                    const Text(
+                  'تست Ping',
+                ),
               ),
             ),
-            const SizedBox(width: 10),
+            const SizedBox(
+              width: 10,
+            ),
             Expanded(
-              child: OutlinedButton.icon(
+              child:
+                  OutlinedButton.icon(
                 onPressed:
-                    loading ? null : loadSubscription,
-                icon: const Icon(Icons.sync),
-                label: const Text('Sync'),
+                    loading
+                        ? null
+                        : loadSubscription,
+                icon:
+                    const Icon(
+                  Icons.sync,
+                ),
+                label:
+                    const Text(
+                  'Sync',
+                ),
               ),
             ),
           ],
         ),
 
-        const SizedBox(height: 12),
+        const SizedBox(
+          height: 12,
+        ),
 
         if (servers.isEmpty)
           card(
-            child: const Center(
+            child:
+                const Center(
               child: Padding(
                 padding:
-                    EdgeInsets.all(30),
-                child: Text(
+                    EdgeInsets.all(
+                  30,
+                ),
+                child:
+                    Text(
                   'هنوز سروری دریافت نشده است',
                 ),
               ),
@@ -1906,81 +2302,114 @@ class _HomePageState extends State<HomePage>
   ) {
     final selected =
         !autoSelectFastest &&
-        selectedServerIndex == index;
+            selectedServerIndex ==
+                index;
 
-    final ping = server.ping;
+    final ping =
+        server.ping;
 
     Color pingColor;
 
     if (ping == null) {
-      pingColor = Colors.white38;
+      pingColor =
+          Colors.white38;
     } else if (ping < 100) {
-      pingColor = Colors.greenAccent;
+      pingColor =
+          Colors.greenAccent;
     } else if (ping < 250) {
-      pingColor = Colors.orangeAccent;
+      pingColor =
+          Colors.orangeAccent;
     } else {
-      pingColor = Colors.redAccent;
+      pingColor =
+          Colors.redAccent;
     }
 
     return Padding(
       padding:
-          const EdgeInsets.only(bottom: 10),
+          const EdgeInsets.only(
+        bottom: 10,
+      ),
       child: InkWell(
         borderRadius:
-            BorderRadius.circular(18),
+            BorderRadius.circular(
+          18,
+        ),
         onTap: () {
-          if (autoSelectFastest) return;
+          if (autoSelectFastest) {
+            return;
+          }
 
           setState(() {
-            selectedServerIndex = index;
+            selectedServerIndex =
+                index;
           });
         },
         child: card(
           padding:
-              const EdgeInsets.all(14),
+              const EdgeInsets.all(
+            14,
+          ),
           child: Row(
             children: [
               Container(
                 width: 42,
                 height: 42,
-                decoration: BoxDecoration(
-                  shape: BoxShape.circle,
-                  color: pingColor.withOpacity(.12),
+                decoration:
+                    BoxDecoration(
+                  shape:
+                      BoxShape.circle,
+                  color:
+                      pingColor
+                          .withValues(
+                    alpha: .12,
+                  ),
                 ),
                 child: Icon(
                   selected
                       ? Icons.check
                       : Icons.dns,
-                  color: pingColor,
+                  color:
+                      pingColor,
                 ),
               ),
 
-              const SizedBox(width: 12),
+              const SizedBox(
+                width: 12,
+              ),
 
               Expanded(
                 child: Column(
                   crossAxisAlignment:
-                      CrossAxisAlignment.start,
+                      CrossAxisAlignment
+                          .start,
                   children: [
                     Text(
                       server.name,
                       maxLines: 1,
                       overflow:
-                          TextOverflow.ellipsis,
-                      style: const TextStyle(
+                          TextOverflow
+                              .ellipsis,
+                      style:
+                          const TextStyle(
                         fontWeight:
-                            FontWeight.bold,
+                            FontWeight
+                                .bold,
                       ),
                     ),
-                    const SizedBox(height: 4),
+                    const SizedBox(
+                      height: 4,
+                    ),
                     Text(
                       '${server.type.toUpperCase()} • ${server.host}:${server.port}',
                       maxLines: 1,
                       overflow:
-                          TextOverflow.ellipsis,
-                      style: const TextStyle(
+                          TextOverflow
+                              .ellipsis,
+                      style:
+                          const TextStyle(
                         fontSize: 11,
-                        color: Colors.white38,
+                        color:
+                            Colors.white38,
                       ),
                     ),
                   ],
@@ -1991,8 +2420,10 @@ class _HomePageState extends State<HomePage>
                 ping == null
                     ? '---'
                     : '$ping ms',
-                style: TextStyle(
-                  color: pingColor,
+                style:
+                    TextStyle(
+                  color:
+                      pingColor,
                   fontWeight:
                       FontWeight.bold,
                 ),
@@ -2010,32 +2441,43 @@ class _HomePageState extends State<HomePage>
 
   Widget trafficPage() {
     return ListView(
-      padding: const EdgeInsets.all(16),
+      padding:
+          const EdgeInsets.all(16),
       children: [
         card(
           child: Column(
             children: [
               const Text(
                 'ترافیک لحظه‌ای VPN',
-                style: TextStyle(
+                style:
+                    TextStyle(
                   fontSize: 19,
-                  fontWeight: FontWeight.bold,
+                  fontWeight:
+                      FontWeight.bold,
                 ),
               ),
 
-              const SizedBox(height: 20),
+              const SizedBox(
+                height: 20,
+              ),
 
               Row(
                 children: [
                   statCard(
                     'دانلود',
-                    formatSpeed(download),
+                    formatSpeed(
+                      download,
+                    ),
                     Icons.download,
                   ),
-                  const SizedBox(width: 10),
+                  const SizedBox(
+                    width: 10,
+                  ),
                   statCard(
                     'آپلود',
-                    formatSpeed(upload),
+                    formatSpeed(
+                      upload,
+                    ),
                     Icons.upload,
                   ),
                 ],
@@ -2044,7 +2486,9 @@ class _HomePageState extends State<HomePage>
           ),
         ),
 
-        const SizedBox(height: 12),
+        const SizedBox(
+          height: 12,
+        ),
 
         card(
           child: Column(
@@ -2052,15 +2496,20 @@ class _HomePageState extends State<HomePage>
               const Align(
                 alignment:
                     Alignment.centerRight,
-                child: Text(
+                child:
+                    Text(
                   'ترافیک این Session',
-                  style: TextStyle(
-                    fontWeight: FontWeight.bold,
+                  style:
+                      TextStyle(
+                    fontWeight:
+                        FontWeight.bold,
                   ),
                 ),
               ),
 
-              const SizedBox(height: 15),
+              const SizedBox(
+                height: 15,
+              ),
 
               _infoRow(
                 'دانلود',
@@ -2087,7 +2536,9 @@ class _HomePageState extends State<HomePage>
           ),
         ),
 
-        const SizedBox(height: 12),
+        const SizedBox(
+          height: 12,
+        ),
 
         card(
           child: Column(
@@ -2095,29 +2546,40 @@ class _HomePageState extends State<HomePage>
               const Align(
                 alignment:
                     Alignment.centerRight,
-                child: Text(
+                child:
+                    Text(
                   'مصرف Subscription',
-                  style: TextStyle(
-                    fontWeight: FontWeight.bold,
+                  style:
+                      TextStyle(
+                    fontWeight:
+                        FontWeight.bold,
                   ),
                 ),
               ),
 
-              const SizedBox(height: 15),
+              const SizedBox(
+                height: 15,
+              ),
 
               _infoRow(
                 'دانلود Subscription',
-                formatBytes(downloadBytes),
+                formatBytes(
+                  downloadBytes,
+                ),
               ),
 
               _infoRow(
                 'آپلود Subscription',
-                formatBytes(uploadBytes),
+                formatBytes(
+                  uploadBytes,
+                ),
               ),
 
               _infoRow(
                 'مصرف کل',
-                formatBytes(usedBytes),
+                formatBytes(
+                  usedBytes,
+                ),
               ),
             ],
           ),
@@ -2132,40 +2594,51 @@ class _HomePageState extends State<HomePage>
 
   Widget subscriptionPage() {
     return ListView(
-      padding: const EdgeInsets.all(16),
+      padding:
+          const EdgeInsets.all(16),
       children: [
         card(
           child: Column(
             crossAxisAlignment:
-                CrossAxisAlignment.stretch,
+                CrossAxisAlignment
+                    .stretch,
             children: [
               const Text(
                 'Subscription',
-                textAlign: TextAlign.right,
-                style: TextStyle(
+                textAlign:
+                    TextAlign.right,
+                style:
+                    TextStyle(
                   fontSize: 20,
-                  fontWeight: FontWeight.bold,
+                  fontWeight:
+                      FontWeight.bold,
                 ),
               ),
 
-              const SizedBox(height: 8),
+              const SizedBox(
+                height: 8,
+              ),
 
-              if (subscriptionTitle.isNotEmpty)
+              if (subscriptionTitle
+                  .isNotEmpty)
                 Text(
                   subscriptionTitle,
-                  textAlign: TextAlign.right,
-                  style: const TextStyle(
-                    color: Colors.white70,
+                  textAlign:
+                      TextAlign.right,
+                  style:
+                      const TextStyle(
+                    color:
+                        Colors.white70,
                   ),
                 ),
 
-              const SizedBox(height: 16),
+              const SizedBox(
+                height: 16,
+              ),
 
               TextField(
                 controller:
-                    TextEditingController(
-                  text: url,
-                ),
+                    urlController,
                 textDirection:
                     TextDirection.ltr,
                 keyboardType:
@@ -2184,12 +2657,15 @@ class _HomePageState extends State<HomePage>
                     ),
                   ),
                 ),
-                onChanged: (value) {
+                onChanged:
+                    (value) {
                   url = value;
                 },
               ),
 
-              const SizedBox(height: 12),
+              const SizedBox(
+                height: 12,
+              ),
 
               FilledButton.icon(
                 onPressed:
@@ -2200,7 +2676,21 @@ class _HomePageState extends State<HomePage>
                               context,
                             ).unfocus();
 
-                            await saveUrl(url);
+                            url =
+                                urlController
+                                    .text
+                                    .trim();
+
+                            if (url.isEmpty) {
+                              _showSnack(
+                                'آدرس Subscription را وارد کن',
+                              );
+                              return;
+                            }
+
+                            await saveUrl(
+                              url,
+                            );
 
                             await loadSubscription();
                           },
@@ -2216,7 +2706,8 @@ class _HomePageState extends State<HomePage>
                     : const Icon(
                         Icons.download,
                       ),
-                label: const Text(
+                label:
+                    const Text(
                   'دریافت و بروزرسانی',
                 ),
               ),
@@ -2224,7 +2715,9 @@ class _HomePageState extends State<HomePage>
           ),
         ),
 
-        const SizedBox(height: 12),
+        const SizedBox(
+          height: 12,
+        ),
 
         card(
           child: Column(
@@ -2235,19 +2728,27 @@ class _HomePageState extends State<HomePage>
               ),
               _infoRow(
                 'حجم کل',
-                formatBytes(totalBytes),
+                formatBytes(
+                  totalBytes,
+                ),
               ),
               _infoRow(
                 'دانلود',
-                formatBytes(downloadBytes),
+                formatBytes(
+                  downloadBytes,
+                ),
               ),
               _infoRow(
                 'آپلود',
-                formatBytes(uploadBytes),
+                formatBytes(
+                  uploadBytes,
+                ),
               ),
               _infoRow(
                 'مصرف',
-                formatBytes(usedBytes),
+                formatBytes(
+                  usedBytes,
+                ),
               ),
               _infoRow(
                 'باقی‌مانده',
@@ -2267,17 +2768,22 @@ class _HomePageState extends State<HomePage>
           ),
         ),
 
-        const SizedBox(height: 12),
+        const SizedBox(
+          height: 12,
+        ),
 
         card(
-          child: const Text(
+          child:
+              const Text(
             'نکته: حجم دانلود، آپلود، حجم کل و تاریخ انقضا زمانی '
             'نمایش داده می‌شوند که سرویس Subscription این اطلاعات '
             'را در Subscription-Userinfo ارسال کند.',
             textDirection:
                 TextDirection.rtl,
-            style: TextStyle(
-              color: Colors.white54,
+            style:
+                TextStyle(
+              color:
+                  Colors.white54,
               height: 1.6,
             ),
           ),
@@ -2292,7 +2798,8 @@ class _HomePageState extends State<HomePage>
 
   Widget settingsPage() {
     return ListView(
-      padding: const EdgeInsets.all(16),
+      padding:
+          const EdgeInsets.all(16),
       children: [
         card(
           child: Column(
@@ -2300,28 +2807,39 @@ class _HomePageState extends State<HomePage>
               const Icon(
                 Icons.flash_on,
                 size: 55,
-                color: Color(0xFF00D4FF),
+                color:
+                    Color(0xFF00D4FF),
               ),
-              const SizedBox(height: 10),
+              const SizedBox(
+                height: 10,
+              ),
               const Text(
                 'Light speed 🔥',
-                style: TextStyle(
+                style:
+                    TextStyle(
                   fontSize: 24,
-                  fontWeight: FontWeight.w900,
+                  fontWeight:
+                      FontWeight.w900,
                 ),
               ),
-              const SizedBox(height: 5),
+              const SizedBox(
+                height: 5,
+              ),
               const Text(
                 'Real VPN Client',
-                style: TextStyle(
-                  color: Colors.white54,
+                style:
+                    TextStyle(
+                  color:
+                      Colors.white54,
                 ),
               ),
             ],
           ),
         ),
 
-        const SizedBox(height: 12),
+        const SizedBox(
+          height: 12,
+        ),
 
         card(
           child: Column(
@@ -2352,7 +2870,9 @@ class _HomePageState extends State<HomePage>
           ),
         ),
 
-        const SizedBox(height: 12),
+        const SizedBox(
+          height: 12,
+        ),
 
         OutlinedButton.icon(
           onPressed: () {
@@ -2366,8 +2886,10 @@ class _HomePageState extends State<HomePage>
               'Subscription URL کپی شد',
             );
           },
-          icon: const Icon(Icons.copy),
-          label: const Text(
+          icon:
+              const Icon(Icons.copy),
+          label:
+              const Text(
             'کپی Subscription URL',
           ),
         ),
@@ -2389,16 +2911,22 @@ class _HomePageState extends State<HomePage>
         children: [
           Icon(
             icon,
-            color: const Color(0xFF00D4FF),
+            color:
+                const Color(0xFF00D4FF),
           ),
-          const SizedBox(width: 12),
+          const SizedBox(
+            width: 12,
+          ),
           Expanded(
-            child: Text(title),
+            child:
+                Text(title),
           ),
           Text(
             value,
-            style: const TextStyle(
-              color: Colors.white54,
+            style:
+                const TextStyle(
+              color:
+                  Colors.white54,
             ),
           ),
         ],
@@ -2411,7 +2939,9 @@ class _HomePageState extends State<HomePage>
   // ==========================================================
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(
+    BuildContext context,
+  ) {
     final pages = [
       homePage(),
       serversPage(),
@@ -2423,10 +2953,13 @@ class _HomePageState extends State<HomePage>
     return Scaffold(
       appBar: AppBar(
         centerTitle: true,
-        title: const Text(
+        title:
+            const Text(
           'Light speed 🔥',
-          style: TextStyle(
-            fontWeight: FontWeight.bold,
+          style:
+              TextStyle(
+            fontWeight:
+                FontWeight.bold,
           ),
         ),
         backgroundColor:
@@ -2434,13 +2967,15 @@ class _HomePageState extends State<HomePage>
       ),
 
       body: SafeArea(
-        child: pages[page],
+        child:
+            pages[page],
       ),
 
       bottomNavigationBar:
           NavigationBar(
         selectedIndex: page,
-        onDestinationSelected: (index) {
+        onDestinationSelected:
+            (index) {
           setState(() {
             page = index;
           });
@@ -2449,13 +2984,15 @@ class _HomePageState extends State<HomePage>
             const Color(0xFF091526),
         destinations: const [
           NavigationDestination(
-            icon: Icon(Icons.home_outlined),
+            icon:
+                Icon(Icons.home_outlined),
             selectedIcon:
                 Icon(Icons.home),
             label: 'خانه',
           ),
           NavigationDestination(
-            icon: Icon(Icons.dns_outlined),
+            icon:
+                Icon(Icons.dns_outlined),
             selectedIcon:
                 Icon(Icons.dns),
             label: 'سرورها',
@@ -2466,10 +3003,14 @@ class _HomePageState extends State<HomePage>
             label: 'ترافیک',
           ),
           NavigationDestination(
-            icon:
-                Icon(Icons.subscriptions_outlined),
+            icon: Icon(
+              Icons
+                  .subscriptions_outlined,
+            ),
             selectedIcon:
-                Icon(Icons.subscriptions),
+                Icon(
+              Icons.subscriptions,
+            ),
             label: 'اشتراک',
           ),
           NavigationDestination(
