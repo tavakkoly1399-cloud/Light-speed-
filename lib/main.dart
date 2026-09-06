@@ -172,11 +172,8 @@ class _HomePageState extends State<HomePage> {
             download = speed(down);
             upload = speed(up);
 
-            downloadTotalBytes =
-                stats.downlinkTotalBytes;
-
-            uploadTotalBytes =
-                stats.uplinkTotalBytes;
+            downloadTotalBytes = stats.downlinkTotalBytes;
+            uploadTotalBytes = stats.uplinkTotalBytes;
           });
         } catch (e) {
           debugPrint('Traffic stats error: $e');
@@ -1001,15 +998,6 @@ class _HomePageState extends State<HomePage> {
 
   // ============================================================
   // ANDROID SING-BOX CONFIG
-  //
-  // این قسمت عمداً ساده‌تر شده.
-  //
-  // auto_detect_interface
-  // روی Android VpnService مناسب نیست.
-  //
-  // dns_mode/dns_address هم حذف شده‌اند تا
-  // با نسخه‌های مختلف sing-box مشکل compatibility
-  // نداشته باشند.
   // ============================================================
 
   String makeConfig(
@@ -1027,10 +1015,6 @@ class _HomePageState extends State<HomePage> {
       'log': {
         'level': 'info',
       },
-
-      // ========================================================
-      // DNS
-      // ========================================================
 
       'dns': {
         'servers': [
@@ -1051,83 +1035,50 @@ class _HomePageState extends State<HomePage> {
             'tag': 'dns-local',
           },
         ],
-
         'final': 'dns-remote',
-
         'strategy': 'ipv4_only',
       },
-
-      // ========================================================
-      // TUN
-      // ========================================================
 
       'inbounds': [
         {
           'type': 'tun',
           'tag': 'tun-in',
-
           'address': [
             '172.19.0.1/30',
           ],
-
-          // برای Android مقدار محافظه‌کارانه‌تر
-          // از 1500 استفاده می‌کنیم.
           'mtu': 1400,
-
-          // کل ترافیک دستگاه
-          // وارد TUN شود.
           'auto_route': true,
-
-          // System برای TCP/UDP
           'stack': 'system',
         },
       ],
 
-      // ========================================================
-      // OUTBOUNDS
-      // ========================================================
-
       'outbounds': [
         proxy,
-
         {
           'type': 'direct',
           'tag': 'direct',
         },
-
         {
           'type': 'block',
           'tag': 'block',
         },
       ],
 
-      // ========================================================
-      // ROUTE
-      // ========================================================
-
       'route': {
         'rules': [
-          // DNS
           {
             'protocol': 'dns',
             'action': 'hijack-dns',
           },
-
-          // DNS port
           {
             'port': 53,
             'action': 'hijack-dns',
           },
-
-          // شبکه‌های داخلی مستقیم
           {
             'ip_is_private': true,
             'outbound': 'direct',
           },
         ],
-
-        // هر چیزی که Rule بالا
-        // نگرفت از Proxy عبور کند.
         'final': 'proxy',
       },
     };
@@ -1235,8 +1186,6 @@ class _HomePageState extends State<HomePage> {
     });
 
     try {
-      // اگر هیچ سروری تست نشده
-      // همه را تست کن.
       if (servers.every(
         (s) => s.ping == null,
       )) {
@@ -1261,10 +1210,6 @@ class _HomePageState extends State<HomePage> {
             'سرور: ${selected!.name}';
       });
 
-      // ========================================================
-      // VPN PERMISSION
-      // ========================================================
-
       final permission =
           await vpn.requestVPNPermission();
 
@@ -1273,10 +1218,6 @@ class _HomePageState extends State<HomePage> {
           'مجوز VPN داده نشد',
         );
       }
-
-      // ========================================================
-      // CONFIG
-      // ========================================================
 
       final config =
           makeConfig(selected);
@@ -1290,15 +1231,7 @@ class _HomePageState extends State<HomePage> {
             'در حال بررسی کانفیگ...';
       });
 
-      // ========================================================
-      // CHECK CONFIG
-      // ========================================================
-
       await vpn.checkConfig(config);
-
-      // ========================================================
-      // CONNECT
-      // ========================================================
 
       setState(() {
         stateText =
@@ -1543,7 +1476,7 @@ class _HomePageState extends State<HomePage> {
             BorderRadius.circular(22),
         border: Border.all(
           color:
-              Colors.white.withOpacity(.05),
+              Colors.white.withValues(alpha: .05),
         ),
       ),
       child: child,
@@ -1759,7 +1692,7 @@ class _HomePageState extends State<HomePage> {
                           : const Color(
                               0xFF00E5FF,
                             )
-                    ).withOpacity(.35),
+                    ).withValues(alpha: .35),
                     blurRadius: 40,
                     spreadRadius: 8,
                   ),
