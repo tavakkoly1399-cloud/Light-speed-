@@ -71,11 +71,13 @@ class HomePage extends StatefulWidget {
 
 class _HomePageState extends State<HomePage> {
   final url = TextEditingController();
+
   final servers = <Server>[];
 
   StreamSubscription? stateSub;
   StreamSubscription? trafficSub;
-  Timer? timer;
+
+  Timer? refreshTimer;
 
   int page = 0;
 
@@ -83,6 +85,12 @@ class _HomePageState extends State<HomePage> {
   bool testing = false;
   bool connected = false;
   bool connecting = false;
+
+  // اگر روشن باشد سریع‌ترین سرور انتخاب می‌شود.
+  // اگر خاموش باشد کاربر سرور را خودش انتخاب می‌کند.
+  bool autoSelectFastest = true;
+
+  int? selectedServerIndex;
 
   String stateText = 'آماده اتصال';
 
@@ -92,11 +100,14 @@ class _HomePageState extends State<HomePage> {
   int downloadTotalBytes = 0;
   int uploadTotalBytes = 0;
 
+  // اطلاعات Subscription
   int? totalBytes;
   int? usedBytes;
   int? uploadBytes;
   int? downloadBytes;
   int? expireAt;
+
+  String subscriptionTitle = 'Subscription';
 
   @override
   void initState() {
@@ -153,7 +164,9 @@ class _HomePageState extends State<HomePage> {
       } catch (_) {}
     });
 
-    timer = Timer.periodic(
+    // بروزرسانی خودکار هر ۱۵ دقیقه
+    // فقط زمانی که VPN متصل نیست.
+    refreshTimer = Timer.periodic(
       const Duration(minutes: 15),
       (_) {
         if (!connected && url.text.trim().isNotEmpty) {
@@ -179,22 +192,30 @@ class _HomePageState extends State<HomePage> {
     await loadSubscription(silent: true);
   }
 
+  // ============================================================
+  // HTTP HEADER
+  // ============================================================
+
   String? responseHeader(
     Map<String, String> headers,
     String wanted,
   ) {
     final target = wanted.toLowerCase();
 
-    for (final e in headers.entries) {
-      if (e.key.toLowerCase() == target) {
-        return e.value;
+    for (final entry in headers.entries) {
+      if (entry.key.toLowerCase() == target) {
+        return entry.value;
       }
     }
 
     return null;
   }
 
-  void _readUserInfo(String? raw) {
+  // ============================================================
+  // SUBSCRIPTION USERINFO
+  // ============================================================
+
+  void readSubscriptionUserInfo(String? raw) {
     if (raw == null || raw.trim().isEmpty) {
       return;
     }
@@ -213,9 +234,11 @@ class _HomePageState extends State<HomePage> {
           .trim()
           .toLowerCase();
 
-      final value = int.tryParse(
-        item.substring(separator + 1).trim(),
-      );
+      final valueText = item
+          .substring(separator + 1)
+          .trim();
+
+      final value = int.tryParse(valueText);
 
       if (value == null) {
         continue;
@@ -231,13 +254,25 @@ class _HomePageState extends State<HomePage> {
           break;
 
         case 'total':
+          values['total'] = value;
+          break;
+
         case 'transfer_enable':
+          values['total'] = value;
+          break;
+
         case 'transfer-enabled':
           values['total'] = value;
           break;
 
         case 'expire':
+          values['expire'] = value;
+          break;
+
         case 'expired_at':
+          values['expire'] = value;
+          break;
+
         case 'expired':
           values['expire'] = value;
           break;
@@ -247,10 +282,6 @@ class _HomePageState extends State<HomePage> {
     if (!mounted) return;
 
     setState(() {
-      if (values.containsKey('total')) {
-        totalBytes = values['total'];
-      }
-
       if (values.containsKey('upload')) {
         uploadBytes = values['upload'];
       }
@@ -259,8 +290,11 @@ class _HomePageState extends State<HomePage> {
         downloadBytes = values['download'];
       }
 
-      if (values.containsKey('upload') ||
-          values.containsKey('download')) {
+      if (values.containsKey('total')) {
+        totalBytes = values['total'];
+      }
+
+      if (uploadBytes != null || downloadBytes != null) {
         usedBytes =
             (uploadBytes ?? 0) +
             (downloadBytes ?? 0);
@@ -271,6 +305,38 @@ class _HomePageState extends State<HomePage> {
       }
     });
   }
+
+  // ============================================================
+  // SUBSCRIPTION HEADERS
+  // ============================================================
+
+  void readSubscriptionHeaders(
+    Map<String, String> headers,
+  ) {
+    final userInfo = responseHeader(
+      headers,
+      'subscription-userinfo',
+    );
+
+    readSubscriptionUserInfo(userInfo);
+
+    final title = responseHeader(
+      headers,
+      'profile-title',
+    );
+
+    if (title != null && title.trim().isNotEmpty) {
+      if (!mounted) return;
+
+      setState(() {
+        subscriptionTitle = title.trim();
+      });
+    }
+  }
+
+  // ============================================================
+  // LOAD SUBSCRIPTION
+  // ============================================================
 
   Future<void> loadSubscription({
     bool silent = false,
@@ -299,8 +365,10 @@ class _HomePageState extends State<HomePage> {
     }
 
     try {
+      final uri = Uri.parse(subscriptionUrl);
+
       final response = await http.get(
-        Uri.parse(subscriptionUrl),
+        uri,
         headers: const {
           'User-Agent': 'LightSpeed/3.0',
           'Accept': '*/*',
@@ -318,19 +386,18 @@ class _HomePageState extends State<HomePage> {
         );
       }
 
+      // اطلاعات حجم و تاریخ انقضا
+      readSubscriptionHeaders(
+        response.headers,
+      );
+
       final body = utf8.decode(
         response.bodyBytes,
         allowMalformed: true,
       );
 
-      _readUserInfo(
-        responseHeader(
-          response.headers,
-          'subscription-userinfo',
-        ),
-      );
-
-      final decodedLines = decodeSubscription(body);
+      final decodedLines =
+          decodeSubscription(body);
 
       final result = <Server>[];
 
@@ -342,13 +409,17 @@ class _HomePageState extends State<HomePage> {
         }
       }
 
-      if (result.isEmpty) {
+      final uniqueServers =
+          removeDuplicateServers(result);
+
+      if (uniqueServers.isEmpty) {
         throw Exception(
           'هیچ کانفیگ قابل شناسایی پیدا نشد',
         );
       }
 
-      final p = await SharedPreferences.getInstance();
+      final p =
+          await SharedPreferences.getInstance();
 
       await p.setString(
         'subscription_url',
@@ -360,7 +431,9 @@ class _HomePageState extends State<HomePage> {
       setState(() {
         servers
           ..clear()
-          ..addAll(result);
+          ..addAll(uniqueServers);
+
+        selectedServerIndex = null;
 
         loading = false;
 
@@ -368,6 +441,7 @@ class _HomePageState extends State<HomePage> {
             '${servers.length} سرور دریافت شد';
       });
 
+      // Ping بعد از دریافت Subscription
       await testAll(silent: true);
     } catch (e) {
       if (!mounted) return;
@@ -385,13 +459,30 @@ class _HomePageState extends State<HomePage> {
     }
   }
 
+  // ============================================================
+  // SUBSCRIPTION DECODER
+  // ============================================================
+
   List<String> decodeSubscription(String body) {
-    final direct = body
+    final cleanBody = body.trim();
+
+    if (cleanBody.isEmpty) {
+      return [];
+    }
+
+    // حالت مستقیم:
+    // vless://
+    // vmess://
+    // trojan://
+    // ss://
+    // hy2://
+    // tuic://
+    final direct = cleanBody
         .replaceAll('\r', '')
         .split('\n')
         .map((x) => x.trim())
         .where(
-          (x) => x.contains('://'),
+          (x) => isSupportedLink(x),
         )
         .toList();
 
@@ -399,8 +490,9 @@ class _HomePageState extends State<HomePage> {
       return direct;
     }
 
+    // حالت Base64 کامل Subscription
     try {
-      var encoded = body.trim();
+      var encoded = cleanBody;
 
       encoded = encoded.replaceAll(
         RegExp(r'\s+'),
@@ -419,22 +511,80 @@ class _HomePageState extends State<HomePage> {
         allowMalformed: true,
       );
 
-      return decoded
+      final result = decoded
           .replaceAll('\r', '')
           .split('\n')
           .map((x) => x.trim())
           .where(
-            (x) => x.contains('://'),
+            (x) => isSupportedLink(x),
           )
           .toList();
-    } catch (_) {
-      return [];
+
+      if (result.isNotEmpty) {
+        return result;
+      }
+    } catch (_) {}
+
+    // بعضی Subscriptionها هر خط را جداگانه Base64 می‌کنند.
+    final result = <String>[];
+
+    for (final line in cleanBody
+        .replaceAll('\r', '')
+        .split('\n')) {
+      final item = line.trim();
+
+      if (item.isEmpty) {
+        continue;
+      }
+
+      try {
+        var encoded = item;
+
+        encoded = encoded
+            .replaceAll('-', '+')
+            .replaceAll('_', '/');
+
+        encoded += '=' *
+            ((4 - encoded.length % 4) % 4);
+
+        final decoded = utf8.decode(
+          base64.decode(encoded),
+          allowMalformed: true,
+        );
+
+        for (final decodedLine
+            in decoded.split('\n')) {
+          final value = decodedLine.trim();
+
+          if (isSupportedLink(value)) {
+            result.add(value);
+          }
+        }
+      } catch (_) {}
     }
+
+    return result;
   }
+
+  bool isSupportedLink(String value) {
+    final text = value.trim().toLowerCase();
+
+    return text.startsWith('vless://') ||
+        text.startsWith('vmess://') ||
+        text.startsWith('trojan://') ||
+        text.startsWith('ss://') ||
+        text.startsWith('hysteria2://') ||
+        text.startsWith('hy2://') ||
+        text.startsWith('tuic://');
+  }
+
+  // ============================================================
+  // PARSE SERVER
+  // ============================================================
 
   Server? parseServer(String raw) {
     try {
-      final u = Uri.parse(raw);
+      final u = Uri.parse(raw.trim());
       final scheme = u.scheme.toLowerCase();
 
       if (scheme == 'vmess') {
@@ -456,42 +606,57 @@ class _HomePageState extends State<HomePage> {
         return null;
       }
 
-      final name = Uri.decodeComponent(
-        u.fragment.isEmpty
+      String name;
+
+      try {
+        name = Uri.decodeComponent(
+          u.fragment.isEmpty
+              ? '${scheme.toUpperCase()} ${u.host}'
+              : u.fragment,
+        );
+      } catch (_) {
+        name = u.fragment.isEmpty
             ? '${scheme.toUpperCase()} ${u.host}'
-            : u.fragment,
-      );
-
-      late Map<String, dynamic> out;
-
-      if (scheme == 'vless') {
-        out = vless(u);
-      } else if (scheme == 'trojan') {
-        out = trojan(u);
-      } else if (scheme == 'ss') {
-        out = shadowsocks(u, raw) ?? {};
-      } else if (scheme == 'tuic') {
-        out = tuic(u);
-      } else {
-        out = hysteria2(u);
+            : u.fragment;
       }
 
-      if (out.isEmpty) {
+      late Map<String, dynamic> outbound;
+
+      if (scheme == 'vless') {
+        outbound = vless(u);
+      } else if (scheme == 'trojan') {
+        outbound = trojan(u);
+      } else if (scheme == 'ss') {
+        outbound =
+            shadowsocks(u, raw) ?? {};
+      } else if (scheme == 'tuic') {
+        outbound = tuic(u);
+      } else {
+        outbound = hysteria2(u);
+      }
+
+      if (outbound.isEmpty) {
         return null;
       }
 
       return Server(
         raw: raw,
-        name: name,
+        name: name.trim().isEmpty
+            ? '${scheme.toUpperCase()} ${u.host}'
+            : name.trim(),
         type: scheme.toUpperCase(),
         host: u.host,
         port: u.port,
-        outbound: out,
+        outbound: outbound,
       );
     } catch (_) {
       return null;
     }
   }
+
+  // ============================================================
+  // VMESS
+  // ============================================================
 
   Server? parseVmess(String raw) {
     try {
@@ -517,9 +682,8 @@ class _HomePageState extends State<HomePage> {
         return null;
       }
 
-      final m = Map<String, dynamic>.from(
-        jsonData,
-      );
+      final m =
+          Map<String, dynamic>.from(jsonData);
 
       final host = '${m['add'] ?? ''}';
 
@@ -594,6 +758,10 @@ class _HomePageState extends State<HomePage> {
     }
   }
 
+  // ============================================================
+  // VLESS
+  // ============================================================
+
   Map<String, dynamic> vless(Uri u) {
     final p = u.queryParameters;
 
@@ -654,6 +822,10 @@ class _HomePageState extends State<HomePage> {
     return out;
   }
 
+  // ============================================================
+  // TROJAN
+  // ============================================================
+
   Map<String, dynamic> trojan(Uri u) {
     final p = u.queryParameters;
 
@@ -690,6 +862,10 @@ class _HomePageState extends State<HomePage> {
 
     return out;
   }
+
+  // ============================================================
+  // SHADOWSOCKS
+  // ============================================================
 
   Map<String, dynamic>? shadowsocks(
     Uri u,
@@ -746,6 +922,10 @@ class _HomePageState extends State<HomePage> {
     }
   }
 
+  // ============================================================
+  // HYSTERIA2
+  // ============================================================
+
   Map<String, dynamic> hysteria2(Uri u) {
     final p = u.queryParameters;
 
@@ -767,6 +947,10 @@ class _HomePageState extends State<HomePage> {
       },
     };
   }
+
+  // ============================================================
+  // TUIC
+  // ============================================================
 
   Map<String, dynamic> tuic(Uri u) {
     final separator =
@@ -805,6 +989,10 @@ class _HomePageState extends State<HomePage> {
       },
     };
   }
+
+  // ============================================================
+  // TRANSPORT
+  // ============================================================
 
   void addTransport(
     Map<String, dynamic> out,
@@ -850,69 +1038,34 @@ class _HomePageState extends State<HomePage> {
     }
   }
 
-  String makeConfig(Server server) {
-    final proxy =
-        Map<String, dynamic>.from(
-      server.outbound,
-    );
+  // ============================================================
+  // REMOVE DUPLICATES
+  // ============================================================
 
-    proxy['tag'] = 'proxy';
+  List<Server> removeDuplicateServers(
+    List<Server> input,
+  ) {
+    final seen = <String>{};
+    final output = <Server>[];
 
-    return jsonEncode({
-      'log': {
-        'level': 'warn',
-      },
+    for (final server in input) {
+      final key =
+          '${server.type}|'
+          '${server.host}|'
+          '${server.port}|'
+          '${server.raw}';
 
-      'dns': {
-        'servers': [
-          {
-            'tag': 'dns-remote',
-            'address':
-                'https://1.1.1.1/dns-query',
-            'detour': 'proxy',
-          },
-        ],
-        'final': 'dns-remote',
-      },
+      if (seen.add(key)) {
+        output.add(server);
+      }
+    }
 
-      'inbounds': [
-        {
-          'type': 'tun',
-          'tag': 'tun-in',
-          'address': [
-            '172.19.0.1/30',
-          ],
-          'mtu': 1500,
-          'stack': 'mixed',
-          'auto_route': true,
-        },
-      ],
-
-      'outbounds': [
-        proxy,
-        {
-          'type': 'direct',
-          'tag': 'direct',
-        },
-        {
-          'type': 'block',
-          'tag': 'block',
-        },
-      ],
-
-      'route': {
-        'auto_detect_interface': true,
-        'override_android_vpn': true,
-        'rules': [
-          {
-            'protocol': 'dns',
-            'action': 'hijack-dns',
-          },
-        ],
-        'final': 'proxy',
-      },
-    });
+    return output;
   }
+
+  // ============================================================
+  // PING ALL
+  // ============================================================
 
   Future<void> testAll({
     bool silent = false,
@@ -927,7 +1080,7 @@ class _HomePageState extends State<HomePage> {
 
         if (!silent) {
           stateText =
-              'در حال تست Ping...';
+              'در حال تست Ping سرورها...';
         }
       });
     }
@@ -970,24 +1123,102 @@ class _HomePageState extends State<HomePage> {
     });
   }
 
+  // ============================================================
+  // FASTEST SERVER
+  // ============================================================
+
   Server? fastest() {
-    final good = servers
+    final available = servers
         .where(
-          (s) => s.ping != null,
+          (server) =>
+              server.ping != null,
         )
         .toList();
 
-    if (good.isEmpty) {
+    if (available.isEmpty) {
       return null;
     }
 
-    good.sort(
+    available.sort(
       (a, b) =>
-          a.ping!.compareTo(b.ping!),
+          a.ping!.compareTo(
+        b.ping!,
+      ),
     );
 
-    return good.first;
+    return available.first;
   }
+
+  // ============================================================
+  // CONFIG
+  // ============================================================
+
+  String makeConfig(Server server) {
+    final proxy =
+        Map<String, dynamic>.from(
+      server.outbound,
+    );
+
+    proxy['tag'] = 'proxy';
+
+    return jsonEncode({
+      'log': {
+        'level': 'warn',
+      },
+
+      'dns': {
+        'servers': [
+          {
+            'type': 'local',
+            'tag': 'local',
+          },
+        ],
+        'final': 'local',
+        'strategy': 'ipv4_only',
+      },
+
+      'inbounds': [
+        {
+          'type': 'tun',
+          'tag': 'tun-in',
+          'address': [
+            '172.19.0.1/30',
+          ],
+          'mtu': 1500,
+          'stack': 'mixed',
+          'auto_route': true,
+        },
+      ],
+
+      'outbounds': [
+        proxy,
+        {
+          'type': 'direct',
+          'tag': 'direct',
+        },
+        {
+          'type': 'block',
+          'tag': 'block',
+        },
+      ],
+
+      'route': {
+        'auto_detect_interface': true,
+        'override_android_vpn': true,
+        'rules': [
+          {
+            'protocol': 'dns',
+            'action': 'hijack-dns',
+          },
+        ],
+        'final': 'proxy',
+      },
+    });
+  }
+
+  // ============================================================
+  // CONNECT
+  // ============================================================
 
   Future<void> connect() async {
     if (servers.isEmpty) {
@@ -1003,39 +1234,65 @@ class _HomePageState extends State<HomePage> {
 
     setState(() {
       connecting = true;
-      stateText =
-          'در حال انتخاب سریع‌ترین سرور...';
+
+      stateText = autoSelectFastest
+          ? 'در حال پیدا کردن سریع‌ترین سرور...'
+          : 'در حال اتصال...';
     });
 
-    if (servers.every(
-      (s) => s.ping == null,
-    )) {
-      await testAll(silent: true);
-    }
+    try {
+      Server? selected;
 
-    final best = fastest();
+      // حالت انتخاب خودکار
+      if (autoSelectFastest) {
+        if (servers.every(
+          (server) =>
+              server.ping == null,
+        )) {
+          await testAll(silent: true);
+        }
 
-    if (best == null) {
+        selected = fastest();
+      }
+
+      // حالت انتخاب دستی
+      else {
+        if (selectedServerIndex == null ||
+            selectedServerIndex! >=
+                servers.length) {
+          throw Exception(
+            'ابتدا یک سرور را انتخاب کن',
+          );
+        }
+
+        selected =
+            servers[selectedServerIndex!];
+      }
+
+      if (selected == null) {
+        throw Exception(
+          'هیچ سرور قابل اتصالی پیدا نشد',
+        );
+      }
+
       if (!mounted) return;
 
       setState(() {
-        connecting = false;
         stateText =
-            'سرور قابل اتصال پیدا نشد';
+            'در حال اتصال به ${selected!.name}...';
       });
 
-      return;
-    }
-
-    try {
       final permission =
           await vpn.requestVPNPermission();
 
       if (!permission) {
         throw Exception(
-          'VPN permission denied',
+          'اجازه VPN داده نشد',
         );
       }
+
+      final config =
+          makeConfig(selected);
 
       if (!mounted) return;
 
@@ -1044,16 +1301,13 @@ class _HomePageState extends State<HomePage> {
             'در حال بررسی کانفیگ...';
       });
 
-      final config =
-          makeConfig(best);
-
       await vpn.checkConfig(config);
 
       if (!mounted) return;
 
       setState(() {
         stateText =
-            'در حال اتصال به ${best.name}...';
+            'در حال راه‌اندازی VPN...';
       });
 
       await vpn.connect(
@@ -1076,8 +1330,9 @@ class _HomePageState extends State<HomePage> {
       setState(() {
         connecting = false;
         connected = true;
+
         stateText =
-            'متصل • ${best.name}';
+            'متصل • ${selected!.name}';
       });
     } catch (e) {
       try {
@@ -1089,7 +1344,8 @@ class _HomePageState extends State<HomePage> {
       setState(() {
         connecting = false;
         connected = false;
-        stateText = 'اتصال ناموفق';
+        stateText =
+            'اتصال ناموفق';
       });
 
       snack(
@@ -1097,6 +1353,10 @@ class _HomePageState extends State<HomePage> {
       );
     }
   }
+
+  // ============================================================
+  // DISCONNECT
+  // ============================================================
 
   Future<void> disconnect() async {
     try {
@@ -1108,7 +1368,9 @@ class _HomePageState extends State<HomePage> {
     setState(() {
       connected = false;
       connecting = false;
-      stateText = 'اتصال قطع شد';
+
+      stateText =
+          'اتصال قطع شد';
 
       download = '0 Mbps';
       upload = '0 Mbps';
@@ -1117,6 +1379,10 @@ class _HomePageState extends State<HomePage> {
       uploadTotalBytes = 0;
     });
   }
+
+  // ============================================================
+  // SPEED
+  // ============================================================
 
   String speed(dynamic bps) {
     final n = bps is num
@@ -1142,6 +1408,10 @@ class _HomePageState extends State<HomePage> {
     return '${n.toStringAsFixed(0)} bps';
   }
 
+  // ============================================================
+  // SIZE
+  // ============================================================
+
   String size(int? bytes) {
     if (bytes == null) {
       return 'نامشخص';
@@ -1155,12 +1425,15 @@ class _HomePageState extends State<HomePage> {
       return '$bytes B';
     }
 
-    if (bytes < 1024 * 1024) {
+    if (bytes <
+        1024 * 1024) {
       return '${(bytes / 1024).toStringAsFixed(1)} KB';
     }
 
     if (bytes <
-        1024 * 1024 * 1024) {
+        1024 *
+            1024 *
+            1024) {
       return '${(bytes / 1024 / 1024).toStringAsFixed(1)} MB';
     }
 
@@ -1175,7 +1448,11 @@ class _HomePageState extends State<HomePage> {
     return '${(bytes / 1024 / 1024 / 1024 / 1024).toStringAsFixed(2)} TB';
   }
 
-  String _dateFromUnix(int timestamp) {
+  // ============================================================
+  // EXPIRY DATE
+  // ============================================================
+
+  String dateFromUnix(int timestamp) {
     try {
       final milliseconds =
           timestamp > 20000000000
@@ -1194,6 +1471,10 @@ class _HomePageState extends State<HomePage> {
       return 'نامشخص';
     }
   }
+
+  // ============================================================
+  // REMAINING TIME
+  // ============================================================
 
   String remainingTime() {
     if (expireAt == null ||
@@ -1244,6 +1525,10 @@ class _HomePageState extends State<HomePage> {
     }
   }
 
+  // ============================================================
+  // SNACK
+  // ============================================================
+
   void snack(String text) {
     if (!mounted) return;
 
@@ -1258,14 +1543,18 @@ class _HomePageState extends State<HomePage> {
       );
   }
 
+  // ============================================================
+  // BUILD
+  // ============================================================
+
   @override
   Widget build(BuildContext context) {
     final pages = [
-      _home(),
-      _servers(),
-      _traffic(),
-      _subscription(),
-      _settings(),
+      homePage(),
+      serversPage(),
+      trafficPage(),
+      subscriptionPage(),
+      settingsPage(),
     ];
 
     return Directionality(
@@ -1279,12 +1568,14 @@ class _HomePageState extends State<HomePage> {
         bottomNavigationBar:
             NavigationBar(
           selectedIndex: page,
+
           onDestinationSelected:
               (index) {
             setState(() {
               page = index;
             });
           },
+
           destinations: const [
             NavigationDestination(
               icon:
@@ -1327,6 +1618,10 @@ class _HomePageState extends State<HomePage> {
     );
   }
 
+  // ============================================================
+  // HEADER
+  // ============================================================
+
   Widget header(
     String title,
     String subtitle,
@@ -1357,7 +1652,11 @@ class _HomePageState extends State<HomePage> {
               color: Colors.white,
             ),
           ),
-          const SizedBox(width: 12),
+
+          const SizedBox(
+            width: 12,
+          ),
+
           Expanded(
             child: Column(
               crossAxisAlignment:
@@ -1388,6 +1687,10 @@ class _HomePageState extends State<HomePage> {
     );
   }
 
+  // ============================================================
+  // CARD
+  // ============================================================
+
   Widget card(Widget child) {
     return Container(
       margin:
@@ -1413,7 +1716,11 @@ class _HomePageState extends State<HomePage> {
     );
   }
 
-  Widget _home() {
+  // ============================================================
+  // HOME
+  // ============================================================
+
+  Widget homePage() {
     final best = fastest();
 
     final percent =
@@ -1424,6 +1731,15 @@ class _HomePageState extends State<HomePage> {
                     totalBytes!)
                 .clamp(0.0, 1.0);
 
+    final remainingBytes =
+        totalBytes == null
+            ? null
+            : max(
+                0,
+                totalBytes! -
+                    (usedBytes ?? 0),
+              );
+
     return ListView(
       padding:
           const EdgeInsets.all(18),
@@ -1433,8 +1749,11 @@ class _HomePageState extends State<HomePage> {
           'اتصال واقعی با sing-box',
         ),
 
-        const SizedBox(height: 8),
+        const SizedBox(
+          height: 8,
+        ),
 
+        // دکمه اصلی VPN
         Center(
           child: GestureDetector(
             onTap: connecting
@@ -1442,12 +1761,16 @@ class _HomePageState extends State<HomePage> {
                 : connected
                     ? disconnect
                     : connect,
+
             child: Container(
               width: 200,
               height: 200,
+
               decoration:
                   BoxDecoration(
-                shape: BoxShape.circle,
+                shape:
+                    BoxShape.circle,
+
                 gradient:
                     LinearGradient(
                   colors: connected
@@ -1460,6 +1783,7 @@ class _HomePageState extends State<HomePage> {
                           Color(0xFF7C4DFF),
                         ],
                 ),
+
                 boxShadow: [
                   BoxShadow(
                     color: (connected
@@ -1477,10 +1801,12 @@ class _HomePageState extends State<HomePage> {
                   ),
                 ],
               ),
+
               child: Center(
                 child: Container(
                   width: 176,
                   height: 176,
+
                   decoration:
                       const BoxDecoration(
                     shape:
@@ -1488,6 +1814,7 @@ class _HomePageState extends State<HomePage> {
                     color:
                         Color(0xFF081322),
                   ),
+
                   child: Center(
                     child: connecting
                         ? const CircularProgressIndicator()
@@ -1536,7 +1863,9 @@ class _HomePageState extends State<HomePage> {
           ),
         ),
 
-        const SizedBox(height: 16),
+        const SizedBox(
+          height: 16,
+        ),
 
         Center(
           child: Text(
@@ -1553,19 +1882,24 @@ class _HomePageState extends State<HomePage> {
           ),
         ),
 
-        const SizedBox(height: 20),
+        const SizedBox(
+          height: 20,
+        ),
 
+        // سریع‌ترین سرور
         card(
           Row(
             children: [
               const Icon(
-                Icons.public,
+                Icons.flash_on,
                 color:
                     Color(0xFF00E5FF),
               ),
+
               const SizedBox(
                 width: 12,
               ),
+
               Expanded(
                 child: Column(
                   crossAxisAlignment:
@@ -1580,9 +1914,10 @@ class _HomePageState extends State<HomePage> {
                             Colors.white54,
                       ),
                     ),
+
                     Text(
                       best?.name ??
-                          'هنوز انتخاب نشده',
+                          'هنوز تست نشده',
                       maxLines: 1,
                       overflow:
                           TextOverflow
@@ -1591,14 +1926,23 @@ class _HomePageState extends State<HomePage> {
                   ],
                 ),
               ),
+
               if (best?.ping != null)
                 Text(
                   '${best!.ping} ms',
+                  style:
+                      const TextStyle(
+                    color:
+                        Colors.greenAccent,
+                    fontWeight:
+                        FontWeight.bold,
+                  ),
                 ),
             ],
           ),
         ),
 
+        // دانلود / آپلود
         Row(
           children: [
             Expanded(
@@ -1608,6 +1952,14 @@ class _HomePageState extends State<HomePage> {
                       CrossAxisAlignment
                           .start,
                   children: [
+                    const Icon(
+                      Icons.download,
+                      color:
+                          Colors.cyanAccent,
+                    ),
+                    const SizedBox(
+                      height: 6,
+                    ),
                     const Text(
                       'دانلود',
                       style:
@@ -1641,6 +1993,14 @@ class _HomePageState extends State<HomePage> {
                       CrossAxisAlignment
                           .start,
                   children: [
+                    const Icon(
+                      Icons.upload,
+                      color:
+                          Colors.cyanAccent,
+                    ),
+                    const SizedBox(
+                      height: 6,
+                    ),
                     const Text(
                       'آپلود',
                       style:
@@ -1665,6 +2025,7 @@ class _HomePageState extends State<HomePage> {
           ],
         ),
 
+        // حجم Subscription
         card(
           Column(
             crossAxisAlignment:
@@ -1678,14 +2039,17 @@ class _HomePageState extends State<HomePage> {
                     color:
                         Color(0xFF7C4DFF),
                   ),
+
                   const SizedBox(
                     width: 8,
                   ),
+
                   const Expanded(
                     child: Text(
                       'حجم اشتراک',
                     ),
                   ),
+
                   Text(
                     size(totalBytes),
                   ),
@@ -1714,68 +2078,97 @@ class _HomePageState extends State<HomePage> {
               ),
 
               Text(
-                'باقی‌مانده: ${size(
-                  totalBytes == null
-                      ? null
-                      : max(
-                          0,
-                          totalBytes! -
-                              (usedBytes ??
-                                  0),
-                        ),
-                )}',
+                'باقی‌مانده: ${size(remainingBytes)}',
               ),
             ],
           ),
         ),
 
+        // اطلاعات دقیق
         card(
           Column(
             crossAxisAlignment:
                 CrossAxisAlignment
                     .start,
             children: [
-              const Text(
-                'اطلاعات اشتراک',
+              Text(
+                subscriptionTitle,
                 style:
-                    TextStyle(
+                    const TextStyle(
                   fontSize: 17,
                   fontWeight:
                       FontWeight.bold,
                 ),
               ),
+
               const SizedBox(
                 height: 12,
               ),
+
               Text(
                 'دانلود مصرف‌شده: ${size(downloadBytes)}',
               ),
+
               const SizedBox(
                 height: 6,
               ),
+
               Text(
                 'آپلود مصرف‌شده: ${size(uploadBytes)}',
               ),
+
               const SizedBox(
                 height: 6,
               ),
+
               Text(
-                'تاریخ انقضا: ${expireAt == null ? 'نامشخص' : _dateFromUnix(expireAt!)}',
+                'تاریخ انقضا: ${expireAt == null ? 'نامشخص' : dateFromUnix(expireAt!)}',
               ),
+
               const SizedBox(
                 height: 6,
               ),
+
               Text(
                 'زمان باقی‌مانده: ${remainingTime()}',
               ),
             ],
           ),
         ),
+
+        FilledButton.icon(
+          onPressed:
+              loading
+                  ? null
+                  : () =>
+                      loadSubscription(),
+          icon: loading
+              ? const SizedBox(
+                  width: 18,
+                  height: 18,
+                  child:
+                      CircularProgressIndicator(
+                    strokeWidth: 2,
+                  ),
+                )
+              : const Icon(
+                  Icons.refresh,
+                ),
+          label: Text(
+            loading
+                ? 'در حال بروزرسانی...'
+                : 'بروزرسانی Subscription',
+          ),
+        ),
       ],
     );
   }
 
-  Widget _servers() {
+  // ============================================================
+  // SERVERS
+  // ============================================================
+
+  Widget serversPage() {
     return ListView(
       padding:
           const EdgeInsets.all(18),
@@ -1785,23 +2178,82 @@ class _HomePageState extends State<HomePage> {
           '${servers.length} سرور',
         ),
 
-        FilledButton.icon(
-          onPressed:
-              testing
-                  ? null
-                  : () => testAll(),
-          icon: const Icon(
-            Icons.speed,
-          ),
-          label: Text(
-            testing
-                ? 'در حال تست...'
-                : 'تست Ping',
+        // انتخاب خودکار / دستی
+        card(
+          Column(
+            children: [
+              SwitchListTile(
+                contentPadding:
+                    EdgeInsets.zero,
+
+                value:
+                    autoSelectFastest,
+
+                onChanged:
+                    connected
+                        ? null
+                        : (value) {
+                            setState(() {
+                              autoSelectFastest =
+                                  value;
+
+                              if (value) {
+                                selectedServerIndex =
+                                    null;
+                              }
+                            });
+                          },
+
+                title:
+                    const Text(
+                  'انتخاب خودکار سریع‌ترین سرور',
+                  style:
+                      TextStyle(
+                    fontWeight:
+                        FontWeight.bold,
+                  ),
+                ),
+
+                subtitle:
+                    Text(
+                  autoSelectFastest
+                      ? 'هنگام اتصال، سریع‌ترین سرور انتخاب می‌شود'
+                      : 'حالت انتخاب دستی فعال است',
+                ),
+              ),
+
+              const Divider(),
+
+              Row(
+                children: [
+                  Expanded(
+                    child:
+                        FilledButton.tonalIcon(
+                      onPressed:
+                          testing
+                              ? null
+                              : () =>
+                                  testAll(),
+                      icon:
+                          const Icon(
+                        Icons.speed,
+                      ),
+                      label:
+                          Text(
+                        testing
+                            ? 'در حال تست...'
+                            : 'تست Ping همه',
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ],
           ),
         ),
 
         const SizedBox(
-          height: 14,
+          height: 4,
         ),
 
         if (servers.isEmpty)
@@ -1817,6 +2269,7 @@ class _HomePageState extends State<HomePage> {
             ),
           ),
 
+        // لیست سرورها
         ...servers
             .asMap()
             .entries
@@ -1824,32 +2277,80 @@ class _HomePageState extends State<HomePage> {
               (entry) {
                 final index =
                     entry.key;
+
                 final server =
                     entry.value;
+
+                final isSelected =
+                    selectedServerIndex ==
+                        index;
 
                 return card(
                   ListTile(
                     contentPadding:
                         EdgeInsets.zero,
 
+                    onTap:
+                        autoSelectFastest
+                            ? null
+                            : () {
+                                setState(() {
+                                  selectedServerIndex =
+                                      index;
+                                });
+
+                                snack(
+                                  'سرور ${server.name} انتخاب شد',
+                                );
+                              },
+
                     leading:
                         CircleAvatar(
-                      child: Text(
+                      child:
+                          Text(
                         '${index + 1}',
                       ),
                     ),
 
-                    title: Text(
-                      server.name,
-                      maxLines: 1,
-                      overflow:
-                          TextOverflow
-                              .ellipsis,
+                    title:
+                        Row(
+                      children: [
+                        Expanded(
+                          child:
+                              Text(
+                            server.name,
+                            maxLines:
+                                1,
+                            overflow:
+                                TextOverflow
+                                    .ellipsis,
+                          ),
+                        ),
+
+                        if (isSelected)
+                          const Padding(
+                            padding:
+                                EdgeInsets.only(
+                              right: 6,
+                            ),
+                            child:
+                                Icon(
+                              Icons
+                                  .check_circle,
+                              color:
+                                  Colors
+                                      .greenAccent,
+                              size: 20,
+                            ),
+                          ),
+                      ],
                     ),
 
-                    subtitle: Text(
+                    subtitle:
+                        Text(
                       '${server.type} • ${server.host}:${server.port}',
-                      maxLines: 1,
+                      maxLines:
+                          1,
                       overflow:
                           TextOverflow
                               .ellipsis,
@@ -1868,8 +2369,7 @@ class _HomePageState extends State<HomePage> {
                               : '${server.ping} ms',
                           style:
                               TextStyle(
-                            color: server
-                                        .ping ==
+                            color: server.ping ==
                                     null
                                 ? Colors
                                     .white38
@@ -1879,6 +2379,8 @@ class _HomePageState extends State<HomePage> {
                                         .greenAccent
                                     : Colors
                                         .orangeAccent,
+                            fontWeight:
+                                FontWeight.bold,
                           ),
                         ),
                       ],
@@ -1891,21 +2393,35 @@ class _HomePageState extends State<HomePage> {
     );
   }
 
-  Widget _traffic() {
+  // ============================================================
+  // TRAFFIC
+  // ============================================================
+
+  Widget trafficPage() {
+    final remainingBytes =
+        totalBytes == null
+            ? null
+            : max(
+                0,
+                totalBytes! -
+                    (usedBytes ??
+                        0),
+              );
+
     return ListView(
       padding:
           const EdgeInsets.all(18),
       children: [
         header(
           'ترافیک',
-          'آمار زنده VPN',
+          'آمار Subscription و VPN',
         ),
 
         card(
           ListTile(
             title:
                 const Text(
-              'دانلود',
+              'دانلود لحظه‌ای',
             ),
             subtitle:
                 Text(download),
@@ -1920,7 +2436,7 @@ class _HomePageState extends State<HomePage> {
           ListTile(
             title:
                 const Text(
-              'آپلود',
+              'آپلود لحظه‌ای',
             ),
             subtitle:
                 Text(upload),
@@ -1935,15 +2451,15 @@ class _HomePageState extends State<HomePage> {
           ListTile(
             title:
                 const Text(
-              'حجم کل اشتراک',
+              'دانلود مصرف‌شده Subscription',
             ),
             subtitle:
                 Text(
-              size(totalBytes),
+              size(downloadBytes),
             ),
             leading:
                 const Icon(
-              Icons.data_usage,
+              Icons.download_done,
             ),
           ),
         ),
@@ -1952,7 +2468,24 @@ class _HomePageState extends State<HomePage> {
           ListTile(
             title:
                 const Text(
-              'مصرف کل اشتراک',
+              'آپلود مصرف‌شده Subscription',
+            ),
+            subtitle:
+                Text(
+              size(uploadBytes),
+            ),
+            leading:
+                const Icon(
+              Icons.upload_file,
+            ),
+          ),
+        ),
+
+        card(
+          ListTile(
+            title:
+                const Text(
+              'مصرف کل',
             ),
             subtitle:
                 Text(
@@ -1969,32 +2502,15 @@ class _HomePageState extends State<HomePage> {
           ListTile(
             title:
                 const Text(
-              'دانلود مصرف‌شده اشتراک',
+              'حجم کل',
             ),
             subtitle:
                 Text(
-              size(downloadBytes),
+              size(totalBytes),
             ),
             leading:
                 const Icon(
-              Icons.download,
-            ),
-          ),
-        ),
-
-        card(
-          ListTile(
-            title:
-                const Text(
-              'آپلود مصرف‌شده اشتراک',
-            ),
-            subtitle:
-                Text(
-              size(uploadBytes),
-            ),
-            leading:
-                const Icon(
-              Icons.upload,
+              Icons.data_usage,
             ),
           ),
         ),
@@ -2007,21 +2523,11 @@ class _HomePageState extends State<HomePage> {
             ),
             subtitle:
                 Text(
-              size(
-                totalBytes ==
-                        null
-                    ? null
-                    : max(
-                        0,
-                        totalBytes! -
-                            (usedBytes ??
-                                0),
-                      ),
-                ),
-              ),
+              size(remainingBytes),
+            ),
             leading:
                 const Icon(
-              Icons.storage,
+              Icons.space_bar,
             ),
           ),
         ),
@@ -2036,7 +2542,7 @@ class _HomePageState extends State<HomePage> {
                 Text(
               expireAt == null
                   ? 'نامشخص'
-                  : _dateFromUnix(
+                  : dateFromUnix(
                       expireAt!,
                     ),
             ),
@@ -2062,6 +2568,24 @@ class _HomePageState extends State<HomePage> {
               Icons.timer,
             ),
           ),
+        ),
+
+        const SizedBox(
+          height: 4,
+        ),
+
+        const Text(
+          'ترافیک این اتصال',
+          style:
+              TextStyle(
+            fontSize: 18,
+            fontWeight:
+                FontWeight.bold,
+          ),
+        ),
+
+        const SizedBox(
+          height: 10,
         ),
 
         card(
@@ -2105,7 +2629,11 @@ class _HomePageState extends State<HomePage> {
     );
   }
 
-  Widget _subscription() {
+  // ============================================================
+  // SUBSCRIPTION PAGE
+  // ============================================================
+
+  Widget subscriptionPage() {
     return ListView(
       padding:
           const EdgeInsets.all(18),
@@ -2119,7 +2647,7 @@ class _HomePageState extends State<HomePage> {
           controller: url,
           textDirection:
               TextDirection.ltr,
-          maxLines: 2,
+          maxLines: 3,
           decoration:
               const InputDecoration(
             labelText:
@@ -2135,140 +2663,32 @@ class _HomePageState extends State<HomePage> {
           height: 12,
         ),
 
-        FilledButton.icon(
-          onPressed:
+        SizedBox(
+          width: double.infinity,
+          child: FilledButton.icon(
+            onPressed:
+                loading
+                    ? null
+                    : () =>
+                        loadSubscription(),
+            icon: loading
+                ? const SizedBox(
+                    width: 18,
+                    height: 18,
+                    child:
+                        CircularProgressIndicator(
+                      strokeWidth: 2,
+                    ),
+                  )
+                : const Icon(
+                    Icons.refresh,
+                  ),
+            label: Text(
               loading
-                  ? null
-                  : () =>
-                      loadSubscription(),
-          icon: const Icon(
-            Icons.refresh,
-          ),
-          label: Text(
-            loading
-                ? 'در حال دریافت...'
-                : 'بروزرسانی',
-          ),
-        ),
-
-        const SizedBox(
-          height: 18,
-        ),
-
-        card(
-          const ListTile(
-            contentPadding:
-                EdgeInsets.zero,
-            leading: Icon(
-              Icons.sync,
-            ),
-            title: Text(
-              'بروزرسانی خودکار',
-            ),
-            subtitle: Text(
-              'هر ۱۵ دقیقه، در صورت قطع بودن VPN',
+                  ? 'در حال دریافت...'
+                  : 'بروزرسانی Subscription',
             ),
           ),
         ),
 
-        card(
-          ListTile(
-            contentPadding:
-                EdgeInsets.zero,
-            leading: const Icon(
-              Icons.dns,
-            ),
-            title: const Text(
-              'تعداد سرورها',
-            ),
-            subtitle:
-                Text(
-              '${servers.length}',
-            ),
-          ),
-        ),
-      ],
-    );
-  }
-
-  Widget _settings() {
-    return ListView(
-      padding:
-          const EdgeInsets.all(18),
-      children: [
-        header(
-          'تنظیمات',
-          'Light speed 🔥',
-        ),
-
-        card(
-          const ListTile(
-            leading:
-                Icon(Icons.flash_on),
-            title: Text(
-              'انتخاب سریع‌ترین سرور',
-            ),
-            subtitle: Text(
-              'ابتدا Ping سرورها بررسی می‌شود و سپس سریع‌ترین سرور برای اتصال انتخاب می‌شود.',
-            ),
-          ),
-        ),
-
-        card(
-          const ListTile(
-            leading:
-                Icon(Icons.sync),
-            title: Text(
-              'Auto Refresh',
-            ),
-            subtitle: Text(
-              'Subscription هر ۱۵ دقیقه بروزرسانی می‌شود.',
-            ),
-          ),
-        ),
-
-        card(
-          ListTile(
-            leading:
-                const Icon(
-              Icons.shield,
-            ),
-            title:
-                const Text(
-              'VPN Engine',
-            ),
-            subtitle:
-                Text(
-              'sing-box / Android VpnService\n$stateText',
-            ),
-          ),
-        ),
-
-        card(
-          const ListTile(
-            leading:
-                Icon(Icons.info),
-            title:
-                Text(
-              'Light speed 🔥',
-            ),
-            subtitle:
-                Text(
-              'Real VPN Client',
-            ),
-          ),
-        ),
-      ],
-    );
-  }
-
-  @override
-  void dispose() {
-    stateSub?.cancel();
-    trafficSub?.cancel();
-    timer?.cancel();
-    url.dispose();
-
-    super.dispose();
-  }
-}
+        const Sized
