@@ -157,6 +157,7 @@ class _HomePageState extends State<HomePage> {
           connecting = false;
           stateText = 'VPN متصل است';
           connectedAt ??= DateTime.now();
+          internetStatus = '🟡 در انتظار ترافیک...';
         });
 
         _startDuration();
@@ -175,6 +176,8 @@ class _HomePageState extends State<HomePage> {
           connecting = false;
           stateText = 'قطع شد';
           internetStatus = 'VPN قطع است';
+          connectedAt = null;
+          connectionDuration = Duration.zero;
         });
 
         durationTimer?.cancel();
@@ -237,9 +240,12 @@ class _HomePageState extends State<HomePage> {
           up,
         );
 
-        // اگر ترافیک واقعی مشاهده شد،
-        // یعنی TUN فقط روشن نیست و واقعاً
-        // در حال عبور دادن داده است.
+        /*
+         * این مهم‌ترین تشخیص ماست:
+         *
+         * اگر sing-box واقعاً داده عبور دهد،
+         * TrafficStats افزایش پیدا می‌کند.
+         */
         if (connected &&
             (downTotal > 0 || upTotal > 0)) {
           internetStatus =
@@ -256,12 +262,11 @@ class _HomePageState extends State<HomePage> {
 
       final text = fault.toString();
 
+      if (text.trim().isEmpty) return;
+
       setState(() {
         lastFault = text;
-
-        if (text.isNotEmpty) {
-          stateText = 'خطای sing-box';
-        }
+        stateText = 'خطای sing-box';
       });
     });
   }
@@ -431,7 +436,8 @@ class _HomePageState extends State<HomePage> {
     final map = <String, int>{};
 
     for (final item in header.split(';')) {
-      final parts = item.trim().split('=');
+      final parts =
+          item.trim().split('=');
 
       if (parts.length != 2) continue;
 
@@ -443,8 +449,11 @@ class _HomePageState extends State<HomePage> {
       }
     }
 
-    final upload = map['upload'] ?? 0;
-    final download = map['download'] ?? 0;
+    final upload =
+        map['upload'] ?? 0;
+
+    final download =
+        map['download'] ?? 0;
 
     return SubscriptionInfo(
       total: map['total'],
@@ -467,7 +476,7 @@ class _HomePageState extends State<HomePage> {
     }
 
     // ----------------------------------------------------------
-    // 1. مستقیم JSON
+    // 1. JSON
     // ----------------------------------------------------------
 
     final jsonServers =
@@ -478,7 +487,7 @@ class _HomePageState extends State<HomePage> {
     }
 
     // ----------------------------------------------------------
-    // 2. URIهای مستقیم
+    // 2. URI
     // ----------------------------------------------------------
 
     final direct =
@@ -512,7 +521,7 @@ class _HomePageState extends State<HomePage> {
     }
 
     // ----------------------------------------------------------
-    // 4. ممکن است متن Base64 چند لایه باشد
+    // 4. Base64 چندلایه
     // ----------------------------------------------------------
 
     if (text.length > 20) {
@@ -567,8 +576,8 @@ class _HomePageState extends State<HomePage> {
   ) {
     final result = <Server>[];
 
-    // sing-box
-    final outbounds = root['outbounds'];
+    final outbounds =
+        root['outbounds'];
 
     if (outbounds is List) {
       result.addAll(
@@ -578,9 +587,8 @@ class _HomePageState extends State<HomePage> {
       );
     }
 
-    // بعضی Subscriptionها
-    // از proxies استفاده می‌کنند.
-    final proxies = root['proxies'];
+    final proxies =
+        root['proxies'];
 
     if (proxies is List) {
       result.addAll(
@@ -618,31 +626,23 @@ class _HomePageState extends State<HomePage> {
         continue;
       }
 
-      /*
-       * outboundهای گروهی مثل selector/urltest
-       * را به عنوان سرور جداگانه وارد نمی‌کنیم.
-       */
       if (_isGroupOutbound(type)) {
         continue;
       }
 
-      final host =
+      var host =
           '${outbound['server'] ?? ''}';
 
-      final port =
+      var port =
           int.tryParse(
             '${outbound['server_port'] ?? 0}',
           ) ??
           0;
 
       /*
-       * بعضی پروتکل‌ها مثل WireGuard ممکن است
-       * server نداشته باشند و endpoint داشته باشند.
+       * برای outboundهایی که endpoint دارند.
        */
-      var finalHost = host;
-      var finalPort = port;
-
-      if (finalHost.isEmpty) {
+      if (host.isEmpty) {
         final endpoint =
             '${outbound['endpoint'] ?? ''}';
 
@@ -650,12 +650,12 @@ class _HomePageState extends State<HomePage> {
           final parsed =
               _splitHostPort(endpoint);
 
-          finalHost = parsed.$1;
-          finalPort = parsed.$2;
+          host = parsed.$1;
+          port = parsed.$2;
         }
       }
 
-      if (finalHost.isEmpty) {
+      if (host.isEmpty) {
         continue;
       }
 
@@ -667,8 +667,8 @@ class _HomePageState extends State<HomePage> {
           raw: jsonEncode(outbound),
           name: tag,
           type: type.toUpperCase(),
-          host: finalHost,
-          port: finalPort,
+          host: host,
+          port: port,
           outbound: outbound,
         ),
       );
@@ -703,7 +703,8 @@ class _HomePageState extends State<HomePage> {
           ) ??
           0;
 
-      if (host.isEmpty || port <= 0) {
+      if (host.isEmpty ||
+          port <= 0) {
         continue;
       }
 
@@ -711,29 +712,35 @@ class _HomePageState extends State<HomePage> {
 
       switch (type) {
         case 'vless':
-          outbound = _clashVless(p);
+          outbound =
+              _clashVless(p);
           break;
 
         case 'vmess':
-          outbound = _clashVmess(p);
+          outbound =
+              _clashVmess(p);
           break;
 
         case 'trojan':
-          outbound = _clashTrojan(p);
+          outbound =
+              _clashTrojan(p);
           break;
 
         case 'ss':
         case 'shadowsocks':
-          outbound = _clashShadowsocks(p);
+          outbound =
+              _clashShadowsocks(p);
           break;
 
         case 'hysteria2':
         case 'hy2':
-          outbound = _clashHysteria2(p);
+          outbound =
+              _clashHysteria2(p);
           break;
 
         case 'tuic':
-          outbound = _clashTuic(p);
+          outbound =
+              _clashTuic(p);
           break;
       }
 
@@ -821,7 +828,7 @@ class _HomePageState extends State<HomePage> {
 
     for (final line
         in text.split(RegExp(r'\r?\n'))) {
-      var value = line.trim();
+      final value = line.trim();
 
       if (value.isEmpty) continue;
 
@@ -836,16 +843,15 @@ class _HomePageState extends State<HomePage> {
         continue;
       }
 
-      /*
-       * ممکن است قبل از URI شماره یا فاصله باشد.
-       */
       final match = RegExp(
         r'((?:vless|vmess|trojan|ss|shadowsocks|hysteria2|hy2|hysteria|tuic|anytls|shadowtls|http|socks5|socks)://\S+)',
         caseSensitive: false,
       ).firstMatch(value);
 
       if (match != null) {
-        result.add(match.group(1)!);
+        result.add(
+          match.group(1)!,
+        );
       }
     }
 
@@ -911,7 +917,8 @@ class _HomePageState extends State<HomePage> {
   Server? _parseServer(
     String raw,
   ) {
-    final uri = Uri.tryParse(raw);
+    final uri =
+        Uri.tryParse(raw);
 
     if (uri == null) {
       return null;
@@ -919,40 +926,70 @@ class _HomePageState extends State<HomePage> {
 
     switch (uri.scheme.toLowerCase()) {
       case 'vless':
-        return _parseVless(uri, raw);
+        return _parseVless(
+          uri,
+          raw,
+        );
 
       case 'vmess':
         return _parseVmess(raw);
 
       case 'trojan':
-        return _parseTrojan(uri, raw);
+        return _parseTrojan(
+          uri,
+          raw,
+        );
 
       case 'ss':
       case 'shadowsocks':
-        return _parseShadowsocks(uri, raw);
+        return _parseShadowsocks(
+          uri,
+          raw,
+        );
 
       case 'hysteria2':
       case 'hy2':
-        return _parseHysteria2(uri, raw);
+        return _parseHysteria2(
+          uri,
+          raw,
+        );
 
       case 'hysteria':
-        return _parseHysteria(uri, raw);
+        return _parseHysteria(
+          uri,
+          raw,
+        );
 
       case 'tuic':
-        return _parseTuic(uri, raw);
+        return _parseTuic(
+          uri,
+          raw,
+        );
 
       case 'anytls':
-        return _parseAnyTLS(uri, raw);
+        return _parseAnyTLS(
+          uri,
+          raw,
+        );
 
       case 'shadowtls':
-        return _parseShadowTLS(uri, raw);
+        return _parseShadowTLS(
+          uri,
+          raw,
+        );
 
       case 'http':
-        return _parseHttp(uri, raw);
+        return _parseHttp(
+          uri,
+          raw,
+        );
 
       case 'socks':
       case 'socks5':
-        return _parseSocks(uri, raw);
+        return _parseSocks(
+          uri,
+          raw,
+        );
     }
 
     return null;
@@ -972,19 +1009,22 @@ class _HomePageState extends State<HomePage> {
       return null;
     }
 
-    final q = uri.queryParameters;
+    final q =
+        uri.queryParameters;
 
     final outbound =
         <String, dynamic>{
       'type': 'vless',
       'server': uri.host,
       'server_port': uri.port,
-      'uuid': Uri.decodeComponent(
+      'uuid':
+          Uri.decodeComponent(
         uri.userInfo,
       ),
     };
 
-    final flow = q['flow'] ?? '';
+    final flow =
+        q['flow'] ?? '';
 
     if (flow.isNotEmpty) {
       outbound['flow'] = flow;
@@ -1107,15 +1147,6 @@ class _HomePageState extends State<HomePage> {
         server: host,
       );
 
-      if (tls.toLowerCase() == 'reality') {
-        _applyTls(
-          outbound,
-          q,
-          defaultEnabled: true,
-          server: host,
-        );
-      }
-
       _applyTransport(
         outbound,
         q,
@@ -1149,7 +1180,8 @@ class _HomePageState extends State<HomePage> {
       return null;
     }
 
-    final q = uri.queryParameters;
+    final q =
+        uri.queryParameters;
 
     final outbound =
         <String, dynamic>{
@@ -1196,7 +1228,8 @@ class _HomePageState extends State<HomePage> {
     String raw,
   ) {
     try {
-      String user = uri.userInfo;
+      String user =
+          uri.userInfo;
 
       if (user.isEmpty) {
         var encoded =
@@ -1211,8 +1244,7 @@ class _HomePageState extends State<HomePage> {
             .replaceAll('_', '/');
 
         encoded += '=' *
-            ((4 - encoded.length % 4) %
-                4);
+            ((4 - encoded.length % 4) % 4);
 
         user = utf8.decode(
           base64.decode(encoded),
@@ -1220,7 +1252,8 @@ class _HomePageState extends State<HomePage> {
         );
       }
 
-      final index = user.indexOf(':');
+      final index =
+          user.indexOf(':');
 
       if (index <= 0 ||
           uri.host.isEmpty ||
@@ -1238,7 +1271,8 @@ class _HomePageState extends State<HomePage> {
         user.substring(index + 1),
       );
 
-      final q = uri.queryParameters;
+      final q =
+          uri.queryParameters;
 
       final outbound =
           <String, dynamic>{
@@ -1249,7 +1283,8 @@ class _HomePageState extends State<HomePage> {
         'password': password,
       };
 
-      if ((q['plugin'] ?? '').isNotEmpty) {
+      if ((q['plugin'] ?? '')
+          .isNotEmpty) {
         final plugin =
             q['plugin']!;
 
@@ -1294,7 +1329,8 @@ class _HomePageState extends State<HomePage> {
       return null;
     }
 
-    final q = uri.queryParameters;
+    final q =
+        uri.queryParameters;
 
     final password =
         Uri.decodeComponent(
@@ -1318,7 +1354,8 @@ class _HomePageState extends State<HomePage> {
 
     if (q['insecure'] == '1' ||
         q['insecure'] == 'true') {
-      outbound['tls']['insecure'] = true;
+      outbound['tls']['insecure'] =
+          true;
     }
 
     final obfs =
@@ -1357,7 +1394,7 @@ class _HomePageState extends State<HomePage> {
   }
 
   // ============================================================
-  // HYSTERIA OLD
+  // HYSTERIA
   // ============================================================
 
   Server? _parseHysteria(
@@ -1369,7 +1406,8 @@ class _HomePageState extends State<HomePage> {
       return null;
     }
 
-    final q = uri.queryParameters;
+    final q =
+        uri.queryParameters;
 
     final password =
         uri.userInfo.isNotEmpty
@@ -1398,7 +1436,8 @@ class _HomePageState extends State<HomePage> {
 
     if (q['insecure'] == '1' ||
         q['insecure'] == 'true') {
-      outbound['tls']['insecure'] = true;
+      outbound['tls']['insecure'] =
+          true;
     }
 
     return Server(
@@ -1427,7 +1466,8 @@ class _HomePageState extends State<HomePage> {
       return null;
     }
 
-    final q = uri.queryParameters;
+    final q =
+        uri.queryParameters;
 
     String uuid = '';
     String password = '';
@@ -1514,7 +1554,8 @@ class _HomePageState extends State<HomePage> {
       return null;
     }
 
-    final q = uri.queryParameters;
+    final q =
+        uri.queryParameters;
 
     final outbound =
         <String, dynamic>{
@@ -1559,7 +1600,8 @@ class _HomePageState extends State<HomePage> {
       return null;
     }
 
-    final q = uri.queryParameters;
+    final q =
+        uri.queryParameters;
 
     final password =
         Uri.decodeComponent(
@@ -1641,7 +1683,8 @@ class _HomePageState extends State<HomePage> {
       }
     }
 
-    final q = uri.queryParameters;
+    final q =
+        uri.queryParameters;
 
     if (q['security'] == 'tls' ||
         q['tls'] == '1') {
@@ -1679,17 +1722,12 @@ class _HomePageState extends State<HomePage> {
       return null;
     }
 
-    final version =
-        uri.scheme.toLowerCase() == 'socks'
-            ? '5'
-            : '5';
-
     final outbound =
         <String, dynamic>{
       'type': 'socks',
       'server': uri.host,
       'server_port': uri.port,
-      'version': version,
+      'version': '5',
     };
 
     if (uri.userInfo.isNotEmpty) {
@@ -1906,8 +1944,10 @@ class _HomePageState extends State<HomePage> {
       'uuid': uuid,
     };
 
-    if ('${p['flow'] ?? ''}'.isNotEmpty) {
-      o['flow'] = '${p['flow']}';
+    if ('${p['flow'] ?? ''}'
+        .isNotEmpty) {
+      o['flow'] =
+          '${p['flow']}';
     }
 
     if (p['tls'] == true) {
@@ -1922,10 +1962,32 @@ class _HomePageState extends State<HomePage> {
         '${p['network'] ?? ''}';
 
     if (network == 'ws') {
+      final wsOpts =
+          p['ws-opts'];
+
+      String path = '/';
+      String host = '';
+
+      if (wsOpts is Map) {
+        path =
+            '${wsOpts['path'] ?? '/'}';
+
+        final headers =
+            wsOpts['headers'];
+
+        if (headers is Map) {
+          host =
+              '${headers['Host'] ?? ''}';
+        }
+      }
+
       o['transport'] = {
         'type': 'ws',
-        'path':
-            '${p['ws-opts']?['path'] ?? '/'}',
+        'path': path,
+        if (host.isNotEmpty)
+          'headers': {
+            'Host': host,
+          },
       };
     }
 
@@ -2123,14 +2185,19 @@ class _HomePageState extends State<HomePage> {
   (String, int) _splitHostPort(
     String value,
   ) {
-    var text = value.trim();
+    final text =
+        value.trim();
 
     if (text.startsWith('[')) {
-      final end = text.indexOf(']');
+      final end =
+          text.indexOf(']');
 
       if (end > 0) {
         final host =
-            text.substring(1, end);
+            text.substring(
+          1,
+          end,
+        );
 
         var port = 0;
 
@@ -2138,7 +2205,9 @@ class _HomePageState extends State<HomePage> {
             text[end + 1] == ':') {
           port =
               int.tryParse(
-                text.substring(end + 2),
+                text.substring(
+                  end + 2,
+                ),
               ) ??
               0;
         }
@@ -2150,15 +2219,21 @@ class _HomePageState extends State<HomePage> {
       }
     }
 
-    final index = text.lastIndexOf(':');
+    final index =
+        text.lastIndexOf(':');
 
     if (index > 0) {
       final host =
-          text.substring(0, index);
+          text.substring(
+        0,
+        index,
+      );
 
       final port =
           int.tryParse(
-            text.substring(index + 1),
+            text.substring(
+              index + 1,
+            ),
           ) ??
           0;
 
@@ -2218,7 +2293,8 @@ class _HomePageState extends State<HomePage> {
     for (int i = 0;
         i < valid.length;
         i++) {
-      final server = valid[i];
+      final server =
+          valid[i];
 
       final outbound =
           _deepCopyMap(
@@ -2228,21 +2304,18 @@ class _HomePageState extends State<HomePage> {
       final tag =
           'node-$i';
 
-      outbound['tag'] = tag;
+      outbound['tag'] =
+          tag;
 
-      /*
-       * بعضی JSONها ممکن است tag یا فیلدهای
-       * اضافی نامعتبر داشته باشند.
-       *
-       * type/server/server_port را دست نمی‌زنیم.
-       */
-      outbounds.add(outbound);
+      outbounds.add(
+        outbound,
+      );
+
       tags.add(tag);
     }
 
     /*
-     * خروجی مستقیم فقط برای fallback و
-     * سرویس‌های داخلی است.
+     * Direct برای DNS/local/fallback.
      */
     outbounds.add({
       'type': 'direct',
@@ -2252,6 +2325,11 @@ class _HomePageState extends State<HomePage> {
     final useAuto =
         tags.length > 1;
 
+    /*
+     * اگر بیش از یک سرور داریم،
+     * sing-box خودش بهترین مسیر را
+     * با URLTest انتخاب می‌کند.
+     */
     if (useAuto) {
       outbounds.add({
         'type': 'urltest',
@@ -2268,19 +2346,23 @@ class _HomePageState extends State<HomePage> {
     }
 
     /*
-     * مهم:
+     * ==========================================================
+     * CONFIG اصلی sing-box
+     * ==========================================================
      *
-     * TUN تمام ترافیک گوشی را می‌گیرد.
+     * IPv4 ONLY
      *
-     * DNS داخل TUN hijack می‌شود.
-     *
-     * final = auto یعنی تمام ترافیک عادی
-     * از URLTest عبور می‌کند.
+     * هیچ آدرس IPv6 در TUN نداریم.
      */
+
     return jsonEncode({
       'log': {
         'level': 'info',
       },
+
+      // --------------------------------------------------------
+      // DNS
+      // --------------------------------------------------------
 
       'dns': {
         'servers': [
@@ -2289,43 +2371,79 @@ class _HomePageState extends State<HomePage> {
             'tag': 'local',
           },
         ],
+
         'final': 'local',
-        'strategy': 'prefer_ipv4',
+
+        /*
+         * فقط IPv4
+         */
+        'strategy': 'ipv4_only',
       },
+
+      // --------------------------------------------------------
+      // TUN
+      // --------------------------------------------------------
 
       'inbounds': [
         {
           'type': 'tun',
           'tag': 'tun-in',
 
+          /*
+           * فقط IPv4
+           */
           'address': [
             '172.19.0.1/30',
-            'fdfe:dcba:9876::1/126',
           ],
 
           'mtu': 1500,
 
+          /*
+           * mixed یعنی TCP و UDP
+           */
           'stack': 'mixed',
 
+          /*
+           * تمام ترافیک سیستم
+           * وارد TUN می‌شود.
+           */
           'auto_route': true,
 
+          /*
+           * DNS داخل TUN
+           * توسط sing-box کنترل می‌شود.
+           */
           'dns_mode': 'hijack',
 
+          /*
+           * فقط IPv4
+           */
           'dns_address': [
             '172.19.0.2',
-            'fdfe:dcba:9876::2',
           ],
         },
       ],
 
-      'outbounds': outbounds,
+      // --------------------------------------------------------
+      // OUTBOUNDS
+      // --------------------------------------------------------
+
+      'outbounds':
+          outbounds,
+
+      // --------------------------------------------------------
+      // ROUTE
+      // --------------------------------------------------------
 
       'route': {
         /*
-         * برای Android VPN/TUN.
+         * Android VPN/TUN
          */
         'override_android_vpn': true,
 
+        /*
+         * DNS را hijack می‌کنیم.
+         */
         'rules': [
           {
             'protocol': 'dns',
@@ -2333,6 +2451,15 @@ class _HomePageState extends State<HomePage> {
           },
         ],
 
+        /*
+         * اگر چند سرور باشد:
+         *
+         * auto = URLTest
+         *
+         * اگر یک سرور باشد:
+         *
+         * همان node
+         */
         'final':
             useAuto
                 ? 'auto'
@@ -2372,14 +2499,15 @@ class _HomePageState extends State<HomePage> {
     }
 
     /*
-     * این تست فقط TCP diagnostic است.
+     * این Ping فقط TCP Diagnostic است.
      *
-     * معیار اتصال نهایی نیست.
+     * تصمیم نهایی اتصال با URLTest
+     * خود sing-box انجام می‌شود.
      *
-     * سروری که TCP مستقیمش جواب نمی‌دهد
-     * را حذف نمی‌کنیم؛ چون ممکن است TLS/
-     * Reality/Proxy آن کار کند.
+     * بنابراین اگر TCP مستقیم شکست خورد،
+     * سرور را حذف نمی‌کنیم.
      */
+
     for (final server in servers) {
       final stopwatch =
           Stopwatch()..start();
@@ -2390,7 +2518,9 @@ class _HomePageState extends State<HomePage> {
           server.host,
           server.port,
           timeout:
-              const Duration(seconds: 3),
+              const Duration(
+            seconds: 3,
+          ),
         );
 
         socket.destroy();
@@ -2427,7 +2557,8 @@ class _HomePageState extends State<HomePage> {
       return;
     }
 
-    if (connected || connecting) {
+    if (connected ||
+        connecting) {
       return;
     }
 
@@ -2442,7 +2573,7 @@ class _HomePageState extends State<HomePage> {
 
     try {
       /*
-       * Android VpnService permission
+       * درخواست مجوز Android VpnService
        */
       final permission =
           await vpn.requestVPNPermission();
@@ -2455,25 +2586,34 @@ class _HomePageState extends State<HomePage> {
 
       /*
        * تمام سرورها وارد sing-box می‌شوند.
-       *
-       * دیگر با Socket.connect تصمیم
-       * نمی‌گیریم که کدام سرور استفاده شود.
        */
       final config =
           _buildConfig();
+
+      if (!mounted) return;
 
       setState(() {
         stateText =
             'در حال بررسی کانفیگ...';
       });
 
-      await vpn.checkConfig(config);
+      /*
+       * بررسی واقعی config توسط core
+       */
+      await vpn.checkConfig(
+        config,
+      );
+
+      if (!mounted) return;
 
       setState(() {
         stateText =
             'در حال راه‌اندازی TUN...';
       });
 
+      /*
+       * VPN واقعی Android
+       */
       await vpn.connect(
         SessionOptions(
           config: config,
@@ -2510,7 +2650,7 @@ class _HomePageState extends State<HomePage> {
         uploadHistory.clear();
 
         internetStatus =
-            '🟡 در حال بررسی عبور اینترنت...';
+            '🟡 در انتظار عبور ترافیک...';
 
         stateText =
             'VPN متصل است';
@@ -2519,17 +2659,27 @@ class _HomePageState extends State<HomePage> {
       _startDuration();
 
       /*
-       * اجازه می‌دهیم TUN کاملاً بالا بیاید.
+       * چند ثانیه زمان می‌دهیم تا TUN
+       * و route کاملاً فعال شوند.
        */
       Future.delayed(
         const Duration(seconds: 3),
         () {
-          if (mounted && connected) {
+          if (mounted &&
+              connected) {
             testInternet();
           }
         },
       );
     } catch (e) {
+      /*
+       * اگر connect نصفه‌کاره انجام شده باشد،
+       * تلاش می‌کنیم سرویس را تمیز قطع کنیم.
+       */
+      try {
+        await vpn.disconnect();
+      } catch (_) {}
+
       if (!mounted) return;
 
       setState(() {
@@ -2547,7 +2697,7 @@ class _HomePageState extends State<HomePage> {
       });
 
       _showMessage(
-        'اتصال ناموفق بود؛ خطای sing-box را پایین صفحه ببین',
+        'اتصال ناموفق بود؛ خطای sing-box را بررسی کن',
       );
     }
   }
@@ -2564,23 +2714,28 @@ class _HomePageState extends State<HomePage> {
 
     setState(() {
       internetTestRunning = true;
-      internetStatus =
-          'در حال تست اینترنت...';
+
+      /*
+       * هنوز TrafficStats را معیار اصلی
+       * قرار می‌دهیم.
+       */
+      if (!internetStatus.contains('🟢')) {
+        internetStatus =
+            'در حال تست اینترنت...';
+      }
     });
 
+    HttpClient? client;
+
     try {
-      final client =
+      client =
           HttpClient();
 
       client.connectionTimeout =
-          const Duration(seconds: 8);
+          const Duration(
+        seconds: 8,
+      );
 
-      /*
-       * یک درخواست HTTPS واقعی انجام می‌دهیم.
-       *
-       * اگر TUN درست کار کند، این درخواست
-       * باید از مسیر VPN عبور کند.
-       */
       final request =
           await client.getUrl(
         Uri.parse(
@@ -2600,38 +2755,53 @@ class _HomePageState extends State<HomePage> {
 
       final response =
           await request.close().timeout(
-        const Duration(seconds: 8),
+        const Duration(
+          seconds: 8,
+        ),
       );
 
       await response.drain();
-      client.close();
 
       if (!mounted) return;
 
       if (response.statusCode == 204 ||
           (response.statusCode >= 200 &&
               response.statusCode < 400)) {
-        setState(() {
-          internetStatus =
-              '🟢 اینترنت عبور می‌کند';
-        });
+        /*
+         * این تست موفق است، ولی TrafficStats
+         * همچنان معیار قوی‌تر برای عبور
+         * واقعی داده است.
+         */
+        if (!internetStatus.contains('🟢')) {
+          setState(() {
+            internetStatus =
+                '🟢 اینترنت در دسترس است';
+          });
+        }
       } else {
-        setState(() {
-          internetStatus =
-              '🔴 پاسخ اینترنت نامعتبر';
-        });
+        if (!internetStatus.contains('🟢')) {
+          setState(() {
+            internetStatus =
+                '🔴 پاسخ اینترنت نامعتبر';
+          });
+        }
       }
     } catch (e) {
+      /*
+       * اگر TrafficStats قبلاً ترافیک نشان دهد،
+       * این تست را به عنوان خطای VPN ثبت نمی‌کنیم.
+       */
       if (!mounted) return;
 
-      setState(() {
-        internetStatus =
-            '🔴 اینترنت عبور نمی‌کند';
-
-        lastFault =
-            'Internet test: $e';
-      });
+      if (!internetStatus.contains('🟢')) {
+        setState(() {
+          internetStatus =
+              '🟠 تست اینترنت ناموفق';
+        });
+      }
     } finally {
+      client?.close();
+
       if (mounted) {
         setState(() {
           internetTestRunning = false;
@@ -2755,7 +2925,8 @@ class _HomePageState extends State<HomePage> {
       return '$bytes B';
     }
 
-    if (bytes < 1024 * 1024) {
+    if (bytes <
+        1024 * 1024) {
       return
           '${(bytes / 1024).toStringAsFixed(1)} KB';
     }
