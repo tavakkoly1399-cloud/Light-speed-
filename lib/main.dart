@@ -63,15 +63,13 @@ class Server {
   bool usable = true;
 }
 
-class _ParsedSubscription {
-  _ParsedSubscription({
-    required this.servers,
+class SubscriptionInfo {
+  const SubscriptionInfo({
     this.total,
     this.used,
     this.expire,
   });
 
-  final List<Server> servers;
   final int? total;
   final int? used;
   final int? expire;
@@ -143,26 +141,28 @@ class _HomePageState extends State<HomePage> {
     loadSavedSubscription();
   }
 
+  // ============================================================
+  // VPN STATE
+  // ============================================================
+
   void _listenState() {
-    stateSubscription =
-        vpn.serviceStateStream.listen((state) {
+    stateSubscription = vpn.serviceStateStream.listen((state) {
       if (!mounted) return;
 
-      final value =
-          state.toString().toLowerCase();
+      final value = state.toString().toLowerCase();
 
       if (value.contains('started')) {
         setState(() {
           connected = true;
           connecting = false;
-          stateText = 'متصل';
+          stateText = 'VPN متصل است';
           connectedAt ??= DateTime.now();
         });
 
         _startDuration();
 
         Future.delayed(
-          const Duration(seconds: 2),
+          const Duration(seconds: 3),
           () {
             if (mounted && connected) {
               testInternet();
@@ -185,48 +185,66 @@ class _HomePageState extends State<HomePage> {
         });
       } else if (value.contains('stopping')) {
         setState(() {
-          stateText =
-              'در حال قطع اتصال...';
+          stateText = 'در حال قطع اتصال...';
         });
       }
     });
   }
+
+  // ============================================================
+  // REAL TRAFFIC
+  // ============================================================
 
   void _listenTraffic() {
     trafficSubscription =
         vpn.trafficStatsStream.listen((stats) {
       if (!mounted) return;
 
+      final down = max(
+        0,
+        stats.downlinkBps,
+      ).toDouble();
+
+      final up = max(
+        0,
+        stats.uplinkBps,
+      ).toDouble();
+
+      final downTotal = max(
+        0,
+        stats.downlinkTotalBytes,
+      );
+
+      final upTotal = max(
+        0,
+        stats.uplinkTotalBytes,
+      );
+
       setState(() {
-        downloadBps =
-            max(0, stats.downlinkBps)
-                .toDouble();
+        downloadBps = down;
+        uploadBps = up;
 
-        uploadBps =
-            max(0, stats.uplinkBps)
-                .toDouble();
-
-        downloadTotalBytes =
-            max(
-          0,
-          stats.downlinkTotalBytes,
-        );
-
-        uploadTotalBytes =
-            max(
-          0,
-          stats.uplinkTotalBytes,
-        );
+        downloadTotalBytes = downTotal;
+        uploadTotalBytes = upTotal;
 
         _addHistory(
           downloadHistory,
-          downloadBps,
+          down,
         );
 
         _addHistory(
           uploadHistory,
-          uploadBps,
+          up,
         );
+
+        // اگر ترافیک واقعی مشاهده شد،
+        // یعنی TUN فقط روشن نیست و واقعاً
+        // در حال عبور دادن داده است.
+        if (connected &&
+            (downTotal > 0 || upTotal > 0)) {
+          internetStatus =
+              '🟢 اینترنت در حال عبور است';
+        }
       });
     });
   }
@@ -236,12 +254,13 @@ class _HomePageState extends State<HomePage> {
         vpn.faultStream.listen((fault) {
       if (!mounted) return;
 
-      setState(() {
-        lastFault = fault.toString();
+      final text = fault.toString();
 
-        if (lastFault.isNotEmpty) {
-          stateText =
-              'خطای sing-box';
+      setState(() {
+        lastFault = text;
+
+        if (text.isNotEmpty) {
+          stateText = 'خطای sing-box';
         }
       });
     });
@@ -257,6 +276,10 @@ class _HomePageState extends State<HomePage> {
       list.removeAt(0);
     }
   }
+
+  // ============================================================
+  // SUBSCRIPTION
+  // ============================================================
 
   Future<void> loadSavedSubscription() async {
     final prefs =
@@ -292,6 +315,15 @@ class _HomePageState extends State<HomePage> {
       return;
     }
 
+    if (connected) {
+      if (!silent) {
+        _showMessage(
+          'ابتدا VPN را قطع کن',
+        );
+      }
+      return;
+    }
+
     if (mounted) {
       setState(() {
         loading = true;
@@ -304,15 +336,17 @@ class _HomePageState extends State<HomePage> {
     }
 
     try {
+      final uri = Uri.parse(url);
+
       final response = await http.get(
-        Uri.parse(url),
+        uri,
         headers: const {
-          'User-Agent':
-              'LightSpeed/1.0',
+          'User-Agent': 'LightSpeed/2.0',
           'Accept': '*/*',
+          'Cache-Control': 'no-cache',
         },
       ).timeout(
-        const Duration(seconds: 25),
+        const Duration(seconds: 30),
       );
 
       if (response.statusCode < 200 ||
@@ -338,8 +372,7 @@ class _HomePageState extends State<HomePage> {
           _parseSubscriptionBody(body);
 
       final prefs =
-          await SharedPreferences
-              .getInstance();
+          await SharedPreferences.getInstance();
 
       await prefs.setString(
         'subscription_url',
@@ -360,8 +393,10 @@ class _HomePageState extends State<HomePage> {
         loading = false;
 
         stateText = parsed.isEmpty
-            ? 'سروری پیدا نشد'
-            : '${parsed.length} سرور دریافت شد';
+            ? 'هیچ کانفیگ معتبری پیدا نشد'
+            : '${parsed.length} کانفیگ دریافت شد';
+
+        lastFault = '';
       });
 
       if (parsed.isNotEmpty) {
@@ -385,87 +420,398 @@ class _HomePageState extends State<HomePage> {
     }
   }
 
-  _ParsedSubscription _parseSubscriptionInfo(
+  SubscriptionInfo _parseSubscriptionInfo(
     String? header,
   ) {
     if (header == null ||
         header.trim().isEmpty) {
-      return _ParsedSubscription(
-        servers: [],
-      );
+      return const SubscriptionInfo();
     }
 
     final map = <String, int>{};
 
-    for (final item
-        in header.split(';')) {
-      final parts =
-          item.trim().split('=');
+    for (final item in header.split(';')) {
+      final parts = item.trim().split('=');
 
-      if (parts.length != 2) {
-        continue;
-      }
+      if (parts.length != 2) continue;
 
       final value =
-          int.tryParse(parts[1]);
+          int.tryParse(parts[1].trim());
 
       if (value != null) {
-        map[parts[0]] = value;
+        map[parts[0].trim()] = value;
       }
     }
 
-    final upload =
-        map['upload'] ?? 0;
+    final upload = map['upload'] ?? 0;
+    final download = map['download'] ?? 0;
 
-    final download =
-        map['download'] ?? 0;
-
-    return _ParsedSubscription(
-      servers: [],
+    return SubscriptionInfo(
       total: map['total'],
       used: upload + download,
       expire: map['expire'],
     );
   }
 
+  // ============================================================
+  // UNIVERSAL SUBSCRIPTION PARSER
+  // ============================================================
+
   List<Server> _parseSubscriptionBody(
     String body,
   ) {
-    final trimmed = body.trim();
+    var text = body.trim();
 
-    if (trimmed.isEmpty) {
+    if (text.isEmpty) {
       return [];
     }
 
-    // 1) Sing-box JSON config
-    if (trimmed.startsWith('{')) {
-      final jsonServers =
-          _parseSingBoxJson(trimmed);
+    // ----------------------------------------------------------
+    // 1. مستقیم JSON
+    // ----------------------------------------------------------
 
-      if (jsonServers.isNotEmpty) {
-        return jsonServers;
-      }
+    final jsonServers =
+        _parseJsonAnything(text);
+
+    if (jsonServers.isNotEmpty) {
+      return jsonServers;
     }
 
-    // 2) مستقیم
+    // ----------------------------------------------------------
+    // 2. URIهای مستقیم
+    // ----------------------------------------------------------
+
     final direct =
-        _extractUriLines(trimmed);
+        _extractUriLines(text);
 
     if (direct.isNotEmpty) {
       return _parseUriList(direct);
     }
 
-    // 3) Base64
+    // ----------------------------------------------------------
+    // 3. Base64
+    // ----------------------------------------------------------
+
     final decoded =
-        _decodeBase64(trimmed);
+        _decodeBase64(text);
 
     if (decoded != null) {
-      return _parseUriList(
-        _extractUriLines(decoded),
+      final decodedJson =
+          _parseJsonAnything(decoded);
+
+      if (decodedJson.isNotEmpty) {
+        return decodedJson;
+      }
+
+      final lines =
+          _extractUriLines(decoded);
+
+      if (lines.isNotEmpty) {
+        return _parseUriList(lines);
+      }
+    }
+
+    // ----------------------------------------------------------
+    // 4. ممکن است متن Base64 چند لایه باشد
+    // ----------------------------------------------------------
+
+    if (text.length > 20) {
+      final second =
+          _decodeBase64(
+        _removeWhitespace(text),
       );
+
+      if (second != null &&
+          second != text) {
+        final lines =
+            _extractUriLines(second);
+
+        if (lines.isNotEmpty) {
+          return _parseUriList(lines);
+        }
+      }
     }
 
     return [];
+  }
+
+  String _removeWhitespace(
+    String text,
+  ) {
+    return text.replaceAll(
+      RegExp(r'\s+'),
+      '',
+    );
+  }
+
+  List<Server> _parseJsonAnything(
+    String text,
+  ) {
+    try {
+      final decoded = jsonDecode(text);
+
+      if (decoded is Map<String, dynamic>) {
+        return _parseJsonRoot(decoded);
+      }
+
+      if (decoded is List) {
+        return _parseJsonOutboundList(decoded);
+      }
+    } catch (_) {}
+
+    return [];
+  }
+
+  List<Server> _parseJsonRoot(
+    Map<String, dynamic> root,
+  ) {
+    final result = <Server>[];
+
+    // sing-box
+    final outbounds = root['outbounds'];
+
+    if (outbounds is List) {
+      result.addAll(
+        _parseJsonOutboundList(
+          outbounds,
+        ),
+      );
+    }
+
+    // بعضی Subscriptionها
+    // از proxies استفاده می‌کنند.
+    final proxies = root['proxies'];
+
+    if (proxies is List) {
+      result.addAll(
+        _parseClashLikeProxies(
+          proxies,
+        ),
+      );
+    }
+
+    return _uniqueServers(result);
+  }
+
+  List<Server> _parseJsonOutboundList(
+    List list,
+  ) {
+    final result = <Server>[];
+
+    for (int i = 0;
+        i < list.length;
+        i++) {
+      final item = list[i];
+
+      if (item is! Map) {
+        continue;
+      }
+
+      final outbound =
+          Map<String, dynamic>.from(item);
+
+      final type =
+          '${outbound['type'] ?? ''}'
+              .toLowerCase();
+
+      if (!_supportedOutboundType(type)) {
+        continue;
+      }
+
+      /*
+       * outboundهای گروهی مثل selector/urltest
+       * را به عنوان سرور جداگانه وارد نمی‌کنیم.
+       */
+      if (_isGroupOutbound(type)) {
+        continue;
+      }
+
+      final host =
+          '${outbound['server'] ?? ''}';
+
+      final port =
+          int.tryParse(
+            '${outbound['server_port'] ?? 0}',
+          ) ??
+          0;
+
+      /*
+       * بعضی پروتکل‌ها مثل WireGuard ممکن است
+       * server نداشته باشند و endpoint داشته باشند.
+       */
+      var finalHost = host;
+      var finalPort = port;
+
+      if (finalHost.isEmpty) {
+        final endpoint =
+            '${outbound['endpoint'] ?? ''}';
+
+        if (endpoint.isNotEmpty) {
+          final parsed =
+              _splitHostPort(endpoint);
+
+          finalHost = parsed.$1;
+          finalPort = parsed.$2;
+        }
+      }
+
+      if (finalHost.isEmpty) {
+        continue;
+      }
+
+      final tag =
+          '${outbound['tag'] ?? '$type-$i'}';
+
+      result.add(
+        Server(
+          raw: jsonEncode(outbound),
+          name: tag,
+          type: type.toUpperCase(),
+          host: finalHost,
+          port: finalPort,
+          outbound: outbound,
+        ),
+      );
+    }
+
+    return _uniqueServers(result);
+  }
+
+  List<Server> _parseClashLikeProxies(
+    List list,
+  ) {
+    final result = <Server>[];
+
+    for (final item in list) {
+      if (item is! Map) continue;
+
+      final p =
+          Map<String, dynamic>.from(item);
+
+      final type =
+          '${p['type'] ?? ''}'.toLowerCase();
+
+      final name =
+          '${p['name'] ?? p['server'] ?? type}';
+
+      final host =
+          '${p['server'] ?? ''}';
+
+      final port =
+          int.tryParse(
+            '${p['port'] ?? 0}',
+          ) ??
+          0;
+
+      if (host.isEmpty || port <= 0) {
+        continue;
+      }
+
+      Map<String, dynamic>? outbound;
+
+      switch (type) {
+        case 'vless':
+          outbound = _clashVless(p);
+          break;
+
+        case 'vmess':
+          outbound = _clashVmess(p);
+          break;
+
+        case 'trojan':
+          outbound = _clashTrojan(p);
+          break;
+
+        case 'ss':
+        case 'shadowsocks':
+          outbound = _clashShadowsocks(p);
+          break;
+
+        case 'hysteria2':
+        case 'hy2':
+          outbound = _clashHysteria2(p);
+          break;
+
+        case 'tuic':
+          outbound = _clashTuic(p);
+          break;
+      }
+
+      if (outbound == null) {
+        continue;
+      }
+
+      result.add(
+        Server(
+          raw: jsonEncode(p),
+          name: name,
+          type: type.toUpperCase(),
+          host: host,
+          port: port,
+          outbound: outbound,
+        ),
+      );
+    }
+
+    return result;
+  }
+
+  bool _isGroupOutbound(
+    String type,
+  ) {
+    return {
+      'selector',
+      'urltest',
+      'fallback',
+      'loadbalance',
+      'random',
+      'block',
+      'dns',
+      'direct',
+    }.contains(type);
+  }
+
+  bool _supportedOutboundType(
+    String type,
+  ) {
+    const supported = {
+      'vless',
+      'vmess',
+      'trojan',
+      'shadowsocks',
+      'hysteria',
+      'hysteria2',
+      'tuic',
+      'anytls',
+      'shadowtls',
+      'http',
+      'socks',
+      'ssh',
+      'naive',
+      'wireguard',
+    };
+
+    return supported.contains(
+      type.toLowerCase(),
+    );
+  }
+
+  List<Server> _uniqueServers(
+    List<Server> input,
+  ) {
+    final result = <Server>[];
+    final seen = <String>{};
+
+    for (final server in input) {
+      final key =
+          '${server.type}|${server.host}|${server.port}|${server.raw}';
+
+      if (seen.add(key)) {
+        result.add(server);
+      }
+    }
+
+    return result;
   }
 
   List<String> _extractUriLines(
@@ -477,9 +823,7 @@ class _HomePageState extends State<HomePage> {
         in text.split(RegExp(r'\r?\n'))) {
       var value = line.trim();
 
-      if (value.isEmpty) {
-        continue;
-      }
+      if (value.isEmpty) continue;
 
       if (value.startsWith('#') ||
           value.startsWith('//')) {
@@ -492,8 +836,16 @@ class _HomePageState extends State<HomePage> {
         continue;
       }
 
-      if (value.contains('://')) {
-        result.add(value);
+      /*
+       * ممکن است قبل از URI شماره یا فاصله باشد.
+       */
+      final match = RegExp(
+        r'((?:vless|vmess|trojan|ss|shadowsocks|hysteria2|hy2|hysteria|tuic|anytls|shadowtls|http|socks5|socks)://\S+)',
+        caseSensitive: false,
+      ).firstMatch(value);
+
+      if (match != null) {
+        result.add(match.group(1)!);
       }
     }
 
@@ -505,18 +857,14 @@ class _HomePageState extends State<HomePage> {
   ) {
     try {
       var encoded =
-          value.replaceAll(
-        RegExp(r'\s+'),
-        '',
-      );
+          _removeWhitespace(value);
 
       encoded = encoded
           .replaceAll('-', '+')
           .replaceAll('_', '/');
 
       encoded += '=' *
-          ((4 - encoded.length % 4) %
-              4);
+          ((4 - encoded.length % 4) % 4);
 
       final bytes =
           base64.decode(encoded);
@@ -525,9 +873,11 @@ class _HomePageState extends State<HomePage> {
           utf8.decode(
         bytes,
         allowMalformed: true,
-      );
+      ).trim();
 
-      if (decoded.contains('://')) {
+      if (decoded.contains('://') ||
+          decoded.startsWith('{') ||
+          decoded.startsWith('[')) {
         return decoded;
       }
     } catch (_) {}
@@ -551,183 +901,66 @@ class _HomePageState extends State<HomePage> {
       } catch (_) {}
     }
 
-    return result;
+    return _uniqueServers(result);
   }
 
-  List<Server> _parseSingBoxJson(
-    String body,
-  ) {
-    try {
-      final root =
-          jsonDecode(body)
-              as Map<String, dynamic>;
-
-      final outbounds =
-          root['outbounds'];
-
-      if (outbounds is! List) {
-        return [];
-      }
-
-      final result = <Server>[];
-
-      for (final item in outbounds) {
-        if (item is! Map) {
-          continue;
-        }
-
-        final outbound =
-            Map<String, dynamic>.from(
-          item,
-        );
-
-        final type =
-            '${outbound['type'] ?? ''}';
-
-        if (!_supportedOutboundType(
-          type,
-        )) {
-          continue;
-        }
-
-        final host =
-            '${outbound['server'] ?? ''}';
-
-        final port =
-            int.tryParse(
-              '${outbound['server_port'] ?? 0}',
-            ) ??
-            0;
-
-        if (host.isEmpty ||
-            port <= 0) {
-          continue;
-        }
-
-        final tag =
-            '${outbound['tag'] ?? type}';
-
-        result.add(
-          Server(
-            raw: jsonEncode(
-              outbound,
-            ),
-            name: tag,
-            type: type.toUpperCase(),
-            host: host,
-            port: port,
-            outbound: outbound,
-          ),
-        );
-      }
-
-      return result;
-    } catch (_) {
-      return [];
-    }
-  }
-
-  bool _supportedOutboundType(
-    String type,
-  ) {
-    const supported = {
-      'vless',
-      'vmess',
-      'trojan',
-      'shadowsocks',
-      'hysteria',
-      'hysteria2',
-      'tuic',
-      'anytls',
-      'shadowtls',
-      'http',
-      'socks',
-      'ssh',
-      'naive',
-    };
-
-    return supported.contains(
-      type.toLowerCase(),
-    );
-  }
+  // ============================================================
+  // URI PARSER
+  // ============================================================
 
   Server? _parseServer(
     String raw,
   ) {
-    final uri =
-        Uri.tryParse(raw);
+    final uri = Uri.tryParse(raw);
 
     if (uri == null) {
       return null;
     }
 
-    final scheme =
-        uri.scheme.toLowerCase();
-
-    switch (scheme) {
+    switch (uri.scheme.toLowerCase()) {
       case 'vless':
-        return _parseVless(
-          uri,
-          raw,
-        );
+        return _parseVless(uri, raw);
 
       case 'vmess':
         return _parseVmess(raw);
 
       case 'trojan':
-        return _parseTrojan(
-          uri,
-          raw,
-        );
+        return _parseTrojan(uri, raw);
 
       case 'ss':
       case 'shadowsocks':
-        return _parseShadowsocks(
-          uri,
-          raw,
-        );
+        return _parseShadowsocks(uri, raw);
 
       case 'hysteria2':
       case 'hy2':
-        return _parseHysteria2(
-          uri,
-          raw,
-        );
+        return _parseHysteria2(uri, raw);
+
+      case 'hysteria':
+        return _parseHysteria(uri, raw);
 
       case 'tuic':
-        return _parseTuic(
-          uri,
-          raw,
-        );
+        return _parseTuic(uri, raw);
 
       case 'anytls':
-        return _parseAnyTLS(
-          uri,
-          raw,
-        );
+        return _parseAnyTLS(uri, raw);
 
       case 'shadowtls':
-        return _parseShadowTLS(
-          uri,
-          raw,
-        );
+        return _parseShadowTLS(uri, raw);
 
       case 'http':
-        return _parseHttp(
-          uri,
-          raw,
-        );
+        return _parseHttp(uri, raw);
 
       case 'socks':
       case 'socks5':
-        return _parseSocks(
-          uri,
-          raw,
-        );
+        return _parseSocks(uri, raw);
     }
 
     return null;
   }
+
+  // ============================================================
+  // VLESS
+  // ============================================================
 
   Server? _parseVless(
     Uri uri,
@@ -744,7 +977,6 @@ class _HomePageState extends State<HomePage> {
     final outbound =
         <String, dynamic>{
       'type': 'vless',
-      'tag': 'proxy',
       'server': uri.host,
       'server_port': uri.port,
       'uuid': Uri.decodeComponent(
@@ -785,6 +1017,128 @@ class _HomePageState extends State<HomePage> {
     );
   }
 
+  // ============================================================
+  // VMESS
+  // ============================================================
+
+  Server? _parseVmess(
+    String raw,
+  ) {
+    try {
+      var encoded =
+          raw.substring(
+        raw.indexOf('://') + 3,
+      );
+
+      encoded = encoded
+          .replaceAll('-', '+')
+          .replaceAll('_', '/');
+
+      encoded += '=' *
+          ((4 - encoded.length % 4) % 4);
+
+      final decoded =
+          utf8.decode(
+        base64.decode(encoded),
+        allowMalformed: true,
+      );
+
+      final map =
+          jsonDecode(decoded)
+              as Map<String, dynamic>;
+
+      final host =
+          '${map['add'] ?? ''}';
+
+      final port =
+          int.tryParse(
+            '${map['port'] ?? ''}',
+          ) ??
+          0;
+
+      final uuid =
+          '${map['id'] ?? ''}';
+
+      if (host.isEmpty ||
+          port <= 0 ||
+          uuid.isEmpty) {
+        return null;
+      }
+
+      final outbound =
+          <String, dynamic>{
+        'type': 'vmess',
+        'server': host,
+        'server_port': port,
+        'uuid': uuid,
+        'security':
+            '${map['scy'] ?? 'auto'}',
+      };
+
+      final network =
+          '${map['net'] ?? 'tcp'}';
+
+      final tls =
+          '${map['tls'] ?? ''}';
+
+      final q =
+          <String, String>{
+        'sni':
+            '${map['sni'] ?? ''}',
+        'host':
+            '${map['host'] ?? ''}',
+        'path':
+            '${map['path'] ?? ''}',
+        'type': network,
+        'security': tls,
+        'fp':
+            '${map['fp'] ?? ''}',
+        'pbk':
+            '${map['pbk'] ?? ''}',
+        'sid':
+            '${map['sid'] ?? ''}',
+      };
+
+      _applyTls(
+        outbound,
+        q,
+        defaultEnabled:
+            tls == 'tls',
+        server: host,
+      );
+
+      if (tls.toLowerCase() == 'reality') {
+        _applyTls(
+          outbound,
+          q,
+          defaultEnabled: true,
+          server: host,
+        );
+      }
+
+      _applyTransport(
+        outbound,
+        q,
+      );
+
+      return Server(
+        raw: raw,
+        name:
+            '${map['ps'] ?? 'VMess'}',
+        type: 'VMESS',
+        host: host,
+        port: port,
+        outbound: outbound,
+      );
+    } catch (_) {
+      return null;
+    }
+  }
+
+  // ============================================================
+  // TROJAN
+  // ============================================================
+
   Server? _parseTrojan(
     Uri uri,
     String raw,
@@ -800,7 +1154,6 @@ class _HomePageState extends State<HomePage> {
     final outbound =
         <String, dynamic>{
       'type': 'trojan',
-      'tag': 'proxy',
       'server': uri.host,
       'server_port': uri.port,
       'password':
@@ -834,112 +1187,16 @@ class _HomePageState extends State<HomePage> {
     );
   }
 
-  Server? _parseVmess(
-    String raw,
-  ) {
-    try {
-      var encoded =
-          raw.substring(
-        raw.indexOf('://') + 3,
-      );
-
-      encoded = encoded
-          .replaceAll('-', '+')
-          .replaceAll('_', '/');
-
-      encoded += '=' *
-          ((4 - encoded.length % 4) %
-              4);
-
-      final decoded =
-          utf8.decode(
-        base64.decode(encoded),
-        allowMalformed: true,
-      );
-
-      final map =
-          jsonDecode(decoded)
-              as Map<String, dynamic>;
-
-      final host =
-          '${map['add'] ?? ''}';
-
-      final port =
-          int.tryParse(
-            '${map['port'] ?? ''}',
-          ) ??
-          0;
-
-      final uuid =
-          '${map['id'] ?? ''}';
-
-      if (host.isEmpty ||
-          port <= 0 ||
-          uuid.isEmpty) {
-        return null;
-      }
-
-      final outbound =
-          <String, dynamic>{
-        'type': 'vmess',
-        'tag': 'proxy',
-        'server': host,
-        'server_port': port,
-        'uuid': uuid,
-        'security':
-            '${map['scy'] ?? 'auto'}',
-      };
-
-      final q = <String, String>{
-        'sni':
-            '${map['sni'] ?? ''}',
-        'host':
-            '${map['host'] ?? ''}',
-        'path':
-            '${map['path'] ?? ''}',
-        'type':
-            '${map['net'] ?? 'tcp'}',
-        'security':
-            '${map['tls'] ?? ''}',
-        'fp':
-            '${map['fp'] ?? ''}',
-      };
-
-      _applyTls(
-        outbound,
-        q,
-        defaultEnabled:
-            q['security'] != '' &&
-            q['security'] != 'none',
-        server: host,
-      );
-
-      _applyTransport(
-        outbound,
-        q,
-      );
-
-      return Server(
-        raw: raw,
-        name:
-            '${map['ps'] ?? 'VMess'}',
-        type: 'VMESS',
-        host: host,
-        port: port,
-        outbound: outbound,
-      );
-    } catch (_) {
-      return null;
-    }
-  }
+  // ============================================================
+  // SHADOWSOCKS
+  // ============================================================
 
   Server? _parseShadowsocks(
     Uri uri,
     String raw,
   ) {
     try {
-      String user =
-          uri.userInfo;
+      String user = uri.userInfo;
 
       if (user.isEmpty) {
         var encoded =
@@ -963,8 +1220,7 @@ class _HomePageState extends State<HomePage> {
         );
       }
 
-      final index =
-          user.indexOf(':');
+      final index = user.indexOf(':');
 
       if (index <= 0 ||
           uri.host.isEmpty ||
@@ -982,35 +1238,30 @@ class _HomePageState extends State<HomePage> {
         user.substring(index + 1),
       );
 
-      final q =
-          uri.queryParameters;
+      final q = uri.queryParameters;
 
       final outbound =
           <String, dynamic>{
         'type': 'shadowsocks',
-        'tag': 'proxy',
         'server': uri.host,
         'server_port': uri.port,
         'method': method,
         'password': password,
       };
 
-      if ((q['plugin'] ?? '')
-          .isNotEmpty) {
+      if ((q['plugin'] ?? '').isNotEmpty) {
         final plugin =
             q['plugin']!;
 
-        final pluginParts =
+        final parts =
             plugin.split(';');
 
         outbound['plugin'] =
-            pluginParts.first;
+            parts.first;
 
-        if (pluginParts.length > 1) {
+        if (parts.length > 1) {
           outbound['plugin_opts'] =
-              pluginParts
-                  .skip(1)
-                  .join(';');
+              parts.skip(1).join(';');
         }
       }
 
@@ -1030,6 +1281,10 @@ class _HomePageState extends State<HomePage> {
     }
   }
 
+  // ============================================================
+  // HYSTERIA2
+  // ============================================================
+
   Server? _parseHysteria2(
     Uri uri,
     String raw,
@@ -1039,19 +1294,19 @@ class _HomePageState extends State<HomePage> {
       return null;
     }
 
-    final q =
-        uri.queryParameters;
+    final q = uri.queryParameters;
+
+    final password =
+        Uri.decodeComponent(
+      uri.userInfo,
+    );
 
     final outbound =
         <String, dynamic>{
       'type': 'hysteria2',
-      'tag': 'proxy',
       'server': uri.host,
       'server_port': uri.port,
-      'password':
-          Uri.decodeComponent(
-        uri.userInfo,
-      ),
+      'password': password,
       'tls': {
         'enabled': true,
         'server_name':
@@ -1063,8 +1318,7 @@ class _HomePageState extends State<HomePage> {
 
     if (q['insecure'] == '1' ||
         q['insecure'] == 'true') {
-      outbound['tls']['insecure'] =
-          true;
+      outbound['tls']['insecure'] = true;
     }
 
     final obfs =
@@ -1102,6 +1356,68 @@ class _HomePageState extends State<HomePage> {
     );
   }
 
+  // ============================================================
+  // HYSTERIA OLD
+  // ============================================================
+
+  Server? _parseHysteria(
+    Uri uri,
+    String raw,
+  ) {
+    if (uri.host.isEmpty ||
+        !uri.hasPort) {
+      return null;
+    }
+
+    final q = uri.queryParameters;
+
+    final password =
+        uri.userInfo.isNotEmpty
+            ? Uri.decodeComponent(
+                uri.userInfo,
+              )
+            : (q['auth'] ??
+                q['password'] ??
+                '');
+
+    final outbound =
+        <String, dynamic>{
+      'type': 'hysteria',
+      'server': uri.host,
+      'server_port': uri.port,
+      if (password.isNotEmpty)
+        'auth_str': password,
+      'tls': {
+        'enabled': true,
+        'server_name':
+            q['sni'] ??
+            q['peer'] ??
+            uri.host,
+      },
+    };
+
+    if (q['insecure'] == '1' ||
+        q['insecure'] == 'true') {
+      outbound['tls']['insecure'] = true;
+    }
+
+    return Server(
+      raw: raw,
+      name: _name(
+        uri,
+        'Hysteria ${uri.host}',
+      ),
+      type: 'HYSTERIA',
+      host: uri.host,
+      port: uri.port,
+      outbound: outbound,
+    );
+  }
+
+  // ============================================================
+  // TUIC
+  // ============================================================
+
   Server? _parseTuic(
     Uri uri,
     String raw,
@@ -1111,17 +1427,14 @@ class _HomePageState extends State<HomePage> {
       return null;
     }
 
-    final q =
-        uri.queryParameters;
+    final q = uri.queryParameters;
 
     String uuid = '';
     String password = '';
 
     if (uri.userInfo.contains(':')) {
       final split =
-          uri.userInfo.split(
-        ':',
-      );
+          uri.userInfo.split(':');
 
       uuid =
           Uri.decodeComponent(
@@ -1152,7 +1465,6 @@ class _HomePageState extends State<HomePage> {
     final outbound =
         <String, dynamic>{
       'type': 'tuic',
-      'tag': 'proxy',
       'server': uri.host,
       'server_port': uri.port,
       'uuid': uuid,
@@ -1188,6 +1500,10 @@ class _HomePageState extends State<HomePage> {
     );
   }
 
+  // ============================================================
+  // ANYTLS
+  // ============================================================
+
   Server? _parseAnyTLS(
     Uri uri,
     String raw,
@@ -1198,13 +1514,11 @@ class _HomePageState extends State<HomePage> {
       return null;
     }
 
-    final q =
-        uri.queryParameters;
+    final q = uri.queryParameters;
 
     final outbound =
         <String, dynamic>{
       'type': 'anytls',
-      'tag': 'proxy',
       'server': uri.host,
       'server_port': uri.port,
       'password':
@@ -1232,6 +1546,10 @@ class _HomePageState extends State<HomePage> {
     );
   }
 
+  // ============================================================
+  // SHADOWTLS
+  // ============================================================
+
   Server? _parseShadowTLS(
     Uri uri,
     String raw,
@@ -1241,8 +1559,7 @@ class _HomePageState extends State<HomePage> {
       return null;
     }
 
-    final q =
-        uri.queryParameters;
+    final q = uri.queryParameters;
 
     final password =
         Uri.decodeComponent(
@@ -1258,7 +1575,6 @@ class _HomePageState extends State<HomePage> {
     final outbound =
         <String, dynamic>{
       'type': 'shadowtls',
-      'tag': 'proxy',
       'server': uri.host,
       'server_port': uri.port,
       'version': version,
@@ -1286,6 +1602,10 @@ class _HomePageState extends State<HomePage> {
     );
   }
 
+  // ============================================================
+  // HTTP PROXY
+  // ============================================================
+
   Server? _parseHttp(
     Uri uri,
     String raw,
@@ -1298,7 +1618,6 @@ class _HomePageState extends State<HomePage> {
     final outbound =
         <String, dynamic>{
       'type': 'http',
-      'tag': 'proxy',
       'server': uri.host,
       'server_port': uri.port,
     };
@@ -1322,8 +1641,7 @@ class _HomePageState extends State<HomePage> {
       }
     }
 
-    final q =
-        uri.queryParameters;
+    final q = uri.queryParameters;
 
     if (q['security'] == 'tls' ||
         q['tls'] == '1') {
@@ -1348,6 +1666,10 @@ class _HomePageState extends State<HomePage> {
     );
   }
 
+  // ============================================================
+  // SOCKS
+  // ============================================================
+
   Server? _parseSocks(
     Uri uri,
     String raw,
@@ -1357,13 +1679,17 @@ class _HomePageState extends State<HomePage> {
       return null;
     }
 
+    final version =
+        uri.scheme.toLowerCase() == 'socks'
+            ? '5'
+            : '5';
+
     final outbound =
         <String, dynamic>{
       'type': 'socks',
-      'tag': 'proxy',
       'server': uri.host,
       'server_port': uri.port,
-      'version': '5',
+      'version': version,
     };
 
     if (uri.userInfo.isNotEmpty) {
@@ -1398,6 +1724,10 @@ class _HomePageState extends State<HomePage> {
     );
   }
 
+  // ============================================================
+  // TLS
+  // ============================================================
+
   void _applyTls(
     Map<String, dynamic> outbound,
     Map<String, String> q, {
@@ -1417,18 +1747,23 @@ class _HomePageState extends State<HomePage> {
       return;
     }
 
+    final serverName =
+        q['sni'] ??
+        q['serverName'] ??
+        q['server_name'] ??
+        q['host'] ??
+        server;
+
     final tls =
         <String, dynamic>{
       'enabled': true,
-      'server_name':
-          q['sni'] ??
-          q['server'] ??
-          q['host'] ??
-          server,
+      'server_name': serverName,
     };
 
     final fp =
-        q['fp'] ?? '';
+        q['fp'] ??
+        q['fingerprint'] ??
+        '';
 
     if (fp.isNotEmpty) {
       tls['utls'] = {
@@ -1439,21 +1774,31 @@ class _HomePageState extends State<HomePage> {
 
     if (security == 'reality') {
       final publicKey =
-          q['pbk'] ?? '';
+          q['pbk'] ??
+          q['publicKey'] ??
+          '';
+
+      final shortId =
+          q['sid'] ??
+          q['shortId'] ??
+          '';
 
       if (publicKey.isNotEmpty) {
         tls['reality'] = {
           'enabled': true,
           'public_key': publicKey,
-          if ((q['sid'] ?? '')
-              .isNotEmpty)
-            'short_id': q['sid'],
+          if (shortId.isNotEmpty)
+            'short_id': shortId,
         };
       }
     }
 
     outbound['tls'] = tls;
   }
+
+  // ============================================================
+  // V2RAY TRANSPORT
+  // ============================================================
 
   void _applyTransport(
     Map<String, dynamic> outbound,
@@ -1469,53 +1814,364 @@ class _HomePageState extends State<HomePage> {
         q['path'] ?? '';
 
     final host =
-        q['host'] ?? '';
+        q['host'] ??
+        q['Host'] ??
+        '';
 
-    if (network == 'ws' ||
-        network == 'websocket') {
-      outbound['transport'] = {
-        'type': 'ws',
-        'path':
-            path.isEmpty
-                ? '/'
-                : path,
-        if (host.isNotEmpty)
-          'headers': {
-            'Host': host,
-          },
-      };
-    } else if (network == 'grpc') {
-      outbound['transport'] = {
-        'type': 'grpc',
-        'service_name': path,
-      };
-    } else if (network ==
-        'httpupgrade') {
-      outbound['transport'] = {
-        'type': 'httpupgrade',
-        'path':
-            path.isEmpty
-                ? '/'
-                : path,
-        if (host.isNotEmpty)
-          'host': host,
-      };
-    } else if (network == 'h2' ||
-        network == 'http') {
-      outbound['transport'] = {
-        'type': 'http',
-        'path':
-            path.isEmpty
-                ? '/'
-                : path,
-        if (host.isNotEmpty)
-          'host': [host],
-      };
-    } else if (network == 'quic') {
-      outbound['transport'] = {
-        'type': 'quic',
+    switch (network) {
+      case 'ws':
+      case 'websocket':
+        outbound['transport'] = {
+          'type': 'ws',
+          'path':
+              path.isEmpty ? '/' : path,
+          if (host.isNotEmpty)
+            'headers': {
+              'Host': host,
+            },
+        };
+        break;
+
+      case 'grpc':
+        outbound['transport'] = {
+          'type': 'grpc',
+          'service_name': path,
+        };
+        break;
+
+      case 'httpupgrade':
+      case 'http-upgrade':
+        outbound['transport'] = {
+          'type': 'httpupgrade',
+          'path':
+              path.isEmpty ? '/' : path,
+          if (host.isNotEmpty)
+            'host': host,
+        };
+        break;
+
+      case 'h2':
+      case 'http':
+        outbound['transport'] = {
+          'type': 'http',
+          'path':
+              path.isEmpty ? '/' : path,
+          if (host.isNotEmpty)
+            'host': [host],
+        };
+        break;
+
+      case 'quic':
+        outbound['transport'] = {
+          'type': 'quic',
+        };
+        break;
+
+      case 'tcp':
+      default:
+        break;
+    }
+  }
+
+  // ============================================================
+  // CLASH -> SING-BOX
+  // ============================================================
+
+  Map<String, dynamic>? _clashVless(
+    Map<String, dynamic> p,
+  ) {
+    final uuid =
+        '${p['uuid'] ?? ''}';
+
+    final server =
+        '${p['server'] ?? ''}';
+
+    final port =
+        int.tryParse(
+          '${p['port'] ?? 0}',
+        ) ??
+        0;
+
+    if (uuid.isEmpty ||
+        server.isEmpty ||
+        port <= 0) {
+      return null;
+    }
+
+    final o =
+        <String, dynamic>{
+      'type': 'vless',
+      'server': server,
+      'server_port': port,
+      'uuid': uuid,
+    };
+
+    if ('${p['flow'] ?? ''}'.isNotEmpty) {
+      o['flow'] = '${p['flow']}';
+    }
+
+    if (p['tls'] == true) {
+      o['tls'] = {
+        'enabled': true,
+        'server_name':
+            '${p['servername'] ?? server}',
       };
     }
+
+    final network =
+        '${p['network'] ?? ''}';
+
+    if (network == 'ws') {
+      o['transport'] = {
+        'type': 'ws',
+        'path':
+            '${p['ws-opts']?['path'] ?? '/'}',
+      };
+    }
+
+    return o;
+  }
+
+  Map<String, dynamic>? _clashVmess(
+    Map<String, dynamic> p,
+  ) {
+    final uuid =
+        '${p['uuid'] ?? ''}';
+
+    final server =
+        '${p['server'] ?? ''}';
+
+    final port =
+        int.tryParse(
+          '${p['port'] ?? 0}',
+        ) ??
+        0;
+
+    if (uuid.isEmpty ||
+        server.isEmpty ||
+        port <= 0) {
+      return null;
+    }
+
+    final o =
+        <String, dynamic>{
+      'type': 'vmess',
+      'server': server,
+      'server_port': port,
+      'uuid': uuid,
+      'security':
+          '${p['cipher'] ?? 'auto'}',
+    };
+
+    if (p['tls'] == true) {
+      o['tls'] = {
+        'enabled': true,
+        'server_name':
+            '${p['servername'] ?? server}',
+      };
+    }
+
+    return o;
+  }
+
+  Map<String, dynamic>? _clashTrojan(
+    Map<String, dynamic> p,
+  ) {
+    final password =
+        '${p['password'] ?? ''}';
+
+    final server =
+        '${p['server'] ?? ''}';
+
+    final port =
+        int.tryParse(
+          '${p['port'] ?? 0}',
+        ) ??
+        0;
+
+    if (password.isEmpty ||
+        server.isEmpty ||
+        port <= 0) {
+      return null;
+    }
+
+    return {
+      'type': 'trojan',
+      'server': server,
+      'server_port': port,
+      'password': password,
+      'tls': {
+        'enabled': true,
+        'server_name':
+            '${p['sni'] ?? p['servername'] ?? server}',
+      },
+    };
+  }
+
+  Map<String, dynamic>? _clashShadowsocks(
+    Map<String, dynamic> p,
+  ) {
+    final server =
+        '${p['server'] ?? ''}';
+
+    final port =
+        int.tryParse(
+          '${p['port'] ?? 0}',
+        ) ??
+        0;
+
+    final method =
+        '${p['cipher'] ?? ''}';
+
+    final password =
+        '${p['password'] ?? ''}';
+
+    if (server.isEmpty ||
+        port <= 0 ||
+        method.isEmpty ||
+        password.isEmpty) {
+      return null;
+    }
+
+    return {
+      'type': 'shadowsocks',
+      'server': server,
+      'server_port': port,
+      'method': method,
+      'password': password,
+    };
+  }
+
+  Map<String, dynamic>? _clashHysteria2(
+    Map<String, dynamic> p,
+  ) {
+    final server =
+        '${p['server'] ?? ''}';
+
+    final port =
+        int.tryParse(
+          '${p['port'] ?? 0}',
+        ) ??
+        0;
+
+    final password =
+        '${p['password'] ?? ''}';
+
+    if (server.isEmpty ||
+        port <= 0) {
+      return null;
+    }
+
+    return {
+      'type': 'hysteria2',
+      'server': server,
+      'server_port': port,
+      'password': password,
+      'tls': {
+        'enabled': true,
+        'server_name':
+            '${p['sni'] ?? server}',
+        if (p['skip-cert-verify'] == true)
+          'insecure': true,
+      },
+    };
+  }
+
+  Map<String, dynamic>? _clashTuic(
+    Map<String, dynamic> p,
+  ) {
+    final server =
+        '${p['server'] ?? ''}';
+
+    final port =
+        int.tryParse(
+          '${p['port'] ?? 0}',
+        ) ??
+        0;
+
+    final uuid =
+        '${p['uuid'] ?? ''}';
+
+    final password =
+        '${p['password'] ?? ''}';
+
+    if (server.isEmpty ||
+        port <= 0 ||
+        uuid.isEmpty ||
+        password.isEmpty) {
+      return null;
+    }
+
+    return {
+      'type': 'tuic',
+      'server': server,
+      'server_port': port,
+      'uuid': uuid,
+      'password': password,
+      'tls': {
+        'enabled': true,
+        'server_name':
+            '${p['sni'] ?? server}',
+      },
+    };
+  }
+
+  // ============================================================
+  // HOST:PORT
+  // ============================================================
+
+  (String, int) _splitHostPort(
+    String value,
+  ) {
+    var text = value.trim();
+
+    if (text.startsWith('[')) {
+      final end = text.indexOf(']');
+
+      if (end > 0) {
+        final host =
+            text.substring(1, end);
+
+        var port = 0;
+
+        if (text.length > end + 1 &&
+            text[end + 1] == ':') {
+          port =
+              int.tryParse(
+                text.substring(end + 2),
+              ) ??
+              0;
+        }
+
+        return (
+          host,
+          port,
+        );
+      }
+    }
+
+    final index = text.lastIndexOf(':');
+
+    if (index > 0) {
+      final host =
+          text.substring(0, index);
+
+      final port =
+          int.tryParse(
+            text.substring(index + 1),
+          ) ??
+          0;
+
+      return (
+        host,
+        port,
+      );
+    }
+
+    return (
+      text,
+      0,
+    );
   }
 
   String _name(
@@ -1535,21 +2191,23 @@ class _HomePageState extends State<HomePage> {
     }
   }
 
-  /*
-   * این بخش مهم‌ترین اصلاح است.
-   *
-   * به جای اینکه یک سرور را با Socket.connect
-   * انتخاب کنیم، تمام سرورهای قابل استفاده
-   * به sing-box داده می‌شوند و خود sing-box
-   * URLTest را از داخل outboundها انجام می‌دهد.
-   */
+  // ============================================================
+  // SING-BOX CONFIG
+  // ============================================================
+
   String _buildConfig() {
-    final validServers =
+    final valid =
         servers
             .where(
               (s) => s.usable,
             )
             .toList();
+
+    if (valid.isEmpty) {
+      throw Exception(
+        'هیچ outbound معتبری وجود ندارد',
+      );
+    }
 
     final outbounds =
         <Map<String, dynamic>>[];
@@ -1558,48 +2216,43 @@ class _HomePageState extends State<HomePage> {
         <String>[];
 
     for (int i = 0;
-        i < validServers.length;
+        i < valid.length;
         i++) {
-      final server =
-          validServers[i];
+      final server = valid[i];
 
       final outbound =
-          Map<String, dynamic>.from(
+          _deepCopyMap(
         server.outbound,
       );
 
       final tag =
-          'proxy-$i';
+          'node-$i';
 
       outbound['tag'] = tag;
 
-      outbounds.add(
-        outbound,
-      );
-
+      /*
+       * بعضی JSONها ممکن است tag یا فیلدهای
+       * اضافی نامعتبر داشته باشند.
+       *
+       * type/server/server_port را دست نمی‌زنیم.
+       */
+      outbounds.add(outbound);
       tags.add(tag);
     }
 
-    if (tags.isEmpty) {
-      throw Exception(
-        'هیچ outbound معتبری وجود ندارد',
-      );
-    }
-
     /*
-     * اگر فقط یک سرور داریم،
-     * مستقیم همان را استفاده می‌کنیم.
-     *
-     * اگر چند سرور داریم،
-     * URLTest آنها را از داخل sing-box
-     * آزمایش می‌کند.
+     * خروجی مستقیم فقط برای fallback و
+     * سرویس‌های داخلی است.
      */
-    final finalTag =
-        tags.length == 1
-            ? tags.first
-            : 'auto';
+    outbounds.add({
+      'type': 'direct',
+      'tag': 'direct',
+    });
 
-    if (tags.length > 1) {
+    final useAuto =
+        tags.length > 1;
+
+    if (useAuto) {
       outbounds.add({
         'type': 'urltest',
         'tag': 'auto',
@@ -1614,25 +2267,21 @@ class _HomePageState extends State<HomePage> {
       });
     }
 
-    outbounds.add({
-      'type': 'direct',
-      'tag': 'direct',
-    });
-
-    outbounds.add({
-      'type': 'block',
-      'tag': 'block',
-    });
-
+    /*
+     * مهم:
+     *
+     * TUN تمام ترافیک گوشی را می‌گیرد.
+     *
+     * DNS داخل TUN hijack می‌شود.
+     *
+     * final = auto یعنی تمام ترافیک عادی
+     * از URLTest عبور می‌کند.
+     */
     return jsonEncode({
       'log': {
         'level': 'info',
       },
 
-      /*
-       * local DNS از resolver سیستم Android
-       * استفاده می‌کند.
-       */
       'dns': {
         'servers': [
           {
@@ -1641,7 +2290,7 @@ class _HomePageState extends State<HomePage> {
           },
         ],
         'final': 'local',
-        'strategy': 'ipv4_only',
+        'strategy': 'prefer_ipv4',
       },
 
       'inbounds': [
@@ -1651,6 +2300,7 @@ class _HomePageState extends State<HomePage> {
 
           'address': [
             '172.19.0.1/30',
+            'fdfe:dcba:9876::1/126',
           ],
 
           'mtu': 1500,
@@ -1659,15 +2309,11 @@ class _HomePageState extends State<HomePage> {
 
           'auto_route': true,
 
-          /*
-           * برای Android VPN:
-           * TUN باید بتواند از VPN upstream
-           * استفاده کند.
-           */
           'dns_mode': 'hijack',
 
           'dns_address': [
             '172.19.0.2',
+            'fdfe:dcba:9876::2',
           ],
         },
       ],
@@ -1676,9 +2322,7 @@ class _HomePageState extends State<HomePage> {
 
       'route': {
         /*
-         * روی Android auto_detect_interface
-         * استفاده نمی‌کنیم؛ طبق docs فقط
-         * Linux/Windows/macOS است.
+         * برای Android VPN/TUN.
          */
         'override_android_vpn': true,
 
@@ -1689,21 +2333,36 @@ class _HomePageState extends State<HomePage> {
           },
         ],
 
-        'final': finalTag,
+        'final':
+            useAuto
+                ? 'auto'
+                : tags.first,
       },
     });
   }
+
+  Map<String, dynamic> _deepCopyMap(
+    Map<String, dynamic> source,
+  ) {
+    final decoded =
+        jsonDecode(
+      jsonEncode(source),
+    );
+
+    return Map<String, dynamic>.from(
+      decoded,
+    );
+  }
+
+  // ============================================================
+  // SERVER TEST
+  // ============================================================
 
   Future<void> testAllServers() async {
     if (servers.isEmpty) {
       return;
     }
 
-    /*
-     * این تست فقط TCP reachability است.
-     * برای انتخاب نهایی دیگر از آن استفاده
-     * نمی‌کنیم؛ URLTest sing-box انتخاب می‌کند.
-     */
     if (mounted) {
       setState(() {
         testing = true;
@@ -1712,6 +2371,15 @@ class _HomePageState extends State<HomePage> {
       });
     }
 
+    /*
+     * این تست فقط TCP diagnostic است.
+     *
+     * معیار اتصال نهایی نیست.
+     *
+     * سروری که TCP مستقیمش جواب نمی‌دهد
+     * را حذف نمی‌کنیم؛ چون ممکن است TLS/
+     * Reality/Proxy آن کار کند.
+     */
     for (final server in servers) {
       final stopwatch =
           Stopwatch()..start();
@@ -1729,17 +2397,8 @@ class _HomePageState extends State<HomePage> {
 
         server.ping =
             stopwatch.elapsedMilliseconds;
-        server.usable = true;
       } catch (_) {
         server.ping = null;
-
-        /*
-         * فعلاً حذفش نمی‌کنیم.
-         * ممکن است TCP مستقیم بسته باشد
-         * ولی خود پروتکل از طریق روش دیگری
-         * قابل استفاده باشد.
-         */
-        server.usable = true;
       }
 
       if (mounted) {
@@ -1751,10 +2410,14 @@ class _HomePageState extends State<HomePage> {
       setState(() {
         testing = false;
         stateText =
-            'سرورها آماده‌اند';
+            '${servers.length} سرور آماده اتصال';
       });
     }
   }
+
+  // ============================================================
+  // CONNECT
+  // ============================================================
 
   Future<void> connect() async {
     if (servers.isEmpty) {
@@ -1778,27 +2441,32 @@ class _HomePageState extends State<HomePage> {
     });
 
     try {
+      /*
+       * Android VpnService permission
+       */
       final permission =
           await vpn.requestVPNPermission();
 
       if (!permission) {
         throw Exception(
-          'VPN permission denied',
+          'اجازه VPN داده نشد',
         );
       }
 
       /*
-       * دیگر یک سرور را انتخاب نمی‌کنیم.
        * تمام سرورها وارد sing-box می‌شوند.
+       *
+       * دیگر با Socket.connect تصمیم
+       * نمی‌گیریم که کدام سرور استفاده شود.
        */
       final config =
           _buildConfig();
 
-      /*
-       * اگر کانفیگ حتی یک فیلد اشتباه
-       * داشته باشد، sing-box اینجا باید
-       * خطای واقعی را برگرداند.
-       */
+      setState(() {
+        stateText =
+            'در حال بررسی کانفیگ...';
+      });
+
       await vpn.checkConfig(config);
 
       setState(() {
@@ -1828,6 +2496,7 @@ class _HomePageState extends State<HomePage> {
       setState(() {
         connected = true;
         connecting = false;
+
         connectedAt =
             DateTime.now();
 
@@ -1840,6 +2509,9 @@ class _HomePageState extends State<HomePage> {
         downloadHistory.clear();
         uploadHistory.clear();
 
+        internetStatus =
+            '🟡 در حال بررسی عبور اینترنت...';
+
         stateText =
             'VPN متصل است';
       });
@@ -1847,12 +2519,10 @@ class _HomePageState extends State<HomePage> {
       _startDuration();
 
       /*
-       * کمی صبر می‌کنیم تا TUN واقعاً
-       * بالا بیاید و سپس اینترنت را تست
-       * می‌کنیم.
+       * اجازه می‌دهیم TUN کاملاً بالا بیاید.
        */
       Future.delayed(
-        const Duration(seconds: 2),
+        const Duration(seconds: 3),
         () {
           if (mounted && connected) {
             testInternet();
@@ -1865,19 +2535,26 @@ class _HomePageState extends State<HomePage> {
       setState(() {
         connected = false;
         connecting = false;
+
         stateText =
             'اتصال ناموفق';
+
+        internetStatus =
+            '🔴 اینترنت عبور نمی‌کند';
+
         lastFault =
             e.toString();
-        internetStatus =
-            'اینترنت عبور نکرد';
       });
 
       _showMessage(
-        'VPN وصل نشد؛ خطای واقعی را پایین صفحه ببین',
+        'اتصال ناموفق بود؛ خطای sing-box را پایین صفحه ببین',
       );
     }
   }
+
+  // ============================================================
+  // INTERNET TEST
+  // ============================================================
 
   Future<void> testInternet() async {
     if (!connected ||
@@ -1892,27 +2569,42 @@ class _HomePageState extends State<HomePage> {
     });
 
     try {
+      final client =
+          HttpClient();
+
+      client.connectionTimeout =
+          const Duration(seconds: 8);
+
       /*
-       * این درخواست بعد از بالا آمدن
-       * VpnService انجام می‌شود.
+       * یک درخواست HTTPS واقعی انجام می‌دهیم.
        *
-       * اگر TUN و route درست باشند،
-       * باید پاسخ بگیریم.
+       * اگر TUN درست کار کند، این درخواست
+       * باید از مسیر VPN عبور کند.
        */
-      final response =
-          await http.get(
+      final request =
+          await client.getUrl(
         Uri.parse(
           'https://www.gstatic.com/generate_204',
         ),
-        headers: const {
-          'User-Agent':
-              'LightSpeed/1.0',
-          'Cache-Control':
-              'no-cache',
-        },
-      ).timeout(
+      );
+
+      request.headers.set(
+        HttpHeaders.userAgentHeader,
+        'LightSpeed/2.0',
+      );
+
+      request.headers.set(
+        HttpHeaders.cacheControlHeader,
+        'no-cache',
+      );
+
+      final response =
+          await request.close().timeout(
         const Duration(seconds: 8),
       );
+
+      await response.drain();
+      client.close();
 
       if (!mounted) return;
 
@@ -1935,6 +2627,7 @@ class _HomePageState extends State<HomePage> {
       setState(() {
         internetStatus =
             '🔴 اینترنت عبور نمی‌کند';
+
         lastFault =
             'Internet test: $e';
       });
@@ -1947,10 +2640,21 @@ class _HomePageState extends State<HomePage> {
     }
   }
 
+  // ============================================================
+  // DISCONNECT
+  // ============================================================
+
   Future<void> disconnect() async {
     try {
       await vpn.disconnect();
-    } catch (_) {}
+    } catch (e) {
+      if (mounted) {
+        setState(() {
+          lastFault =
+              'Disconnect: $e';
+        });
+      }
+    }
 
     durationTimer?.cancel();
 
@@ -1967,6 +2671,7 @@ class _HomePageState extends State<HomePage> {
           'VPN قطع است';
 
       connectedAt = null;
+
       connectionDuration =
           Duration.zero;
 
@@ -1981,6 +2686,10 @@ class _HomePageState extends State<HomePage> {
     });
   }
 
+  // ============================================================
+  // DURATION
+  // ============================================================
+
   void _startDuration() {
     durationTimer?.cancel();
 
@@ -1989,6 +2698,7 @@ class _HomePageState extends State<HomePage> {
       const Duration(seconds: 1),
       (_) {
         if (!mounted ||
+            !connected ||
             connectedAt == null) {
           return;
         }
@@ -2002,6 +2712,10 @@ class _HomePageState extends State<HomePage> {
       },
     );
   }
+
+  // ============================================================
+  // FORMAT
+  // ============================================================
 
   String _formatSpeed(
     double bps,
@@ -2041,8 +2755,7 @@ class _HomePageState extends State<HomePage> {
       return '$bytes B';
     }
 
-    if (bytes <
-        1024 * 1024) {
+    if (bytes < 1024 * 1024) {
       return
           '${(bytes / 1024).toStringAsFixed(1)} KB';
     }
@@ -2110,8 +2823,13 @@ class _HomePageState extends State<HomePage> {
       return 'منقضی شده';
     }
 
-    return
-        '${remaining.inDays} روز';
+    final days =
+        remaining.inDays;
+
+    final hours =
+        remaining.inHours % 24;
+
+    return '$days روز و $hours ساعت';
   }
 
   void _showMessage(
@@ -2130,6 +2848,10 @@ class _HomePageState extends State<HomePage> {
       ),
     );
   }
+
+  // ============================================================
+  // UI
+  // ============================================================
 
   @override
   Widget build(
@@ -2183,8 +2905,11 @@ class _HomePageState extends State<HomePage> {
           ],
           onDestinationSelected:
               (index) {
+            /*
+             * ظاهر فعلی حفظ شده.
+             */
             _showMessage(
-              'این بخش در نسخه بعدی تکمیل می‌شود',
+              'بخش $index در مرحله بعدی فعال می‌شود',
             );
           },
         ),
@@ -2233,8 +2958,7 @@ class _HomePageState extends State<HomePage> {
             Expanded(
               child: Column(
                 crossAxisAlignment:
-                    CrossAxisAlignment
-                        .start,
+                    CrossAxisAlignment.start,
                 children: [
                   const Text(
                     'Light speed 🔥',
@@ -2258,13 +2982,12 @@ class _HomePageState extends State<HomePage> {
             ),
             IconButton(
               onPressed:
-                  loading
+                  loading || connected
                       ? null
                       : () =>
                           loadSubscription(),
-              icon: const Icon(
-                Icons.refresh,
-              ),
+              icon:
+                  const Icon(Icons.refresh),
             ),
           ],
         ),
