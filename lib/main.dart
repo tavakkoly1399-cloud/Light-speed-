@@ -25,19 +25,25 @@ class LightSpeedApp extends StatelessWidget {
   Widget build(BuildContext context) {
     return MaterialApp(
       debugShowCheckedModeBanner: false,
-      title: 'Light speed 🔥',
+      title: 'Light speed',
       theme: ThemeData(
         brightness: Brightness.dark,
         useMaterial3: true,
-        scaffoldBackgroundColor: const Color(0xFF07101F),
+        scaffoldBackgroundColor: const Color(0xFF05070D),
         colorScheme: ColorScheme.fromSeed(
-          seedColor: const Color(0xFF00E5FF),
+          seedColor: const Color(0xFF7C4DFF),
           brightness: Brightness.dark,
         ),
+        fontFamily: 'sans',
       ),
       home: const HomePage(),
     );
   }
+}
+
+enum ServerSelectionMode {
+  auto,
+  manual,
 }
 
 class Server {
@@ -98,6 +104,13 @@ class _HomePageState extends State<HomePage> {
   int? uploadBytes;
   int? downloadBytes;
   int? expireAt;
+
+  Server? selectedServer;
+
+  ServerSelectionMode selectionMode =
+      ServerSelectionMode.auto;
+
+  String? lastUpdate;
 
   @override
   void initState() {
@@ -160,10 +173,6 @@ class _HomePageState extends State<HomePage> {
       },
     );
 
-    // ==========================================================
-    // TRAFFIC
-    // ==========================================================
-
     trafficSub = vpn.trafficStatsStream.listen(
       (stats) {
         if (!mounted) return;
@@ -172,9 +181,6 @@ class _HomePageState extends State<HomePage> {
           final down = stats.downlinkBps;
           final up = stats.uplinkBps;
 
-          // DEBUG:
-          // این لاگ مشخص می‌کند خود sing-box
-          // چه مقدار دانلود و آپلود گزارش می‌کند.
           debugPrint(
             'TRAFFIC => '
             'DOWN: ${stats.downlinkBps} bps | '
@@ -194,15 +200,11 @@ class _HomePageState extends State<HomePage> {
                 stats.uplinkTotalBytes;
           });
         } catch (e) {
-          debugPrint(
-            'Traffic stats error: $e',
-          );
+          debugPrint('Traffic stats error: $e');
         }
       },
       onError: (Object error) {
-        debugPrint(
-          'Traffic stream error: $error',
-        );
+        debugPrint('Traffic stream error: $error');
       },
     );
 
@@ -212,9 +214,7 @@ class _HomePageState extends State<HomePage> {
 
         final message = error.toString();
 
-        debugPrint(
-          'SINGBOX FAULT: $message',
-        );
+        debugPrint('SINGBOX FAULT: $message');
 
         setState(() {
           stateText = 'خطای VPN';
@@ -222,20 +222,16 @@ class _HomePageState extends State<HomePage> {
           connecting = false;
         });
 
-        snack(
-          'خطای sing-box:\n$message',
-        );
+        snack('خطای sing-box:\n$message');
       },
       onError: (Object error) {
-        debugPrint(
-          'Fault stream error: $error',
-        );
+        debugPrint('Fault stream error: $error');
       },
     );
   }
 
   // ============================================================
-  // LOAD SAVED
+  // SAVED DATA
   // ============================================================
 
   Future<void> loadSaved() async {
@@ -246,38 +242,159 @@ class _HomePageState extends State<HomePage> {
       final saved =
           prefs.getString('subscription_url');
 
-      if (saved == null || saved.isEmpty) {
-        return;
+      final savedMode =
+          prefs.getString('selection_mode');
+
+      final savedServer =
+          prefs.getString('selected_server_raw');
+
+      if (savedMode == 'manual') {
+        selectionMode =
+            ServerSelectionMode.manual;
+      } else {
+        selectionMode =
+            ServerSelectionMode.auto;
       }
 
-      url.text = saved;
+      if (saved != null && saved.isNotEmpty) {
+        url.text = saved;
 
-      await loadSubscription(
-        silent: true,
-      );
+        await loadSubscription(
+          silent: true,
+          restoreSelectedRaw: savedServer,
+        );
+      }
     } catch (e) {
-      debugPrint(
-        'loadSaved: $e',
-      );
+      debugPrint('loadSaved: $e');
     }
+  }
+
+  Future<void> saveSelectionMode() async {
+    final prefs =
+        await SharedPreferences.getInstance();
+
+    await prefs.setString(
+      'selection_mode',
+      selectionMode ==
+              ServerSelectionMode.manual
+          ? 'manual'
+          : 'auto',
+    );
+  }
+
+  Future<void> saveSelectedServer() async {
+    final prefs =
+        await SharedPreferences.getInstance();
+
+    if (selectedServer == null) {
+      await prefs.remove(
+        'selected_server_raw',
+      );
+      return;
+    }
+
+    await prefs.setString(
+      'selected_server_raw',
+      selectedServer!.raw,
+    );
   }
 
   // ============================================================
   // SUBSCRIPTION
   // ============================================================
 
+  Future<void> addSubscription() async {
+    final controller =
+        TextEditingController(
+      text: url.text,
+    );
+
+    final result =
+        await showDialog<String>(
+      context: context,
+      builder: (context) {
+        return Directionality(
+          textDirection: TextDirection.rtl,
+          child: AlertDialog(
+            backgroundColor:
+                const Color(0xFF101522),
+            title: const Text(
+              'افزودن Subscription',
+            ),
+            content: TextField(
+              controller: controller,
+              autofocus: true,
+              textDirection:
+                  TextDirection.ltr,
+              keyboardType:
+                  TextInputType.url,
+              decoration:
+                  const InputDecoration(
+                hintText:
+                    'https://example.com/sub...',
+                border:
+                    OutlineInputBorder(),
+                prefixIcon:
+                    Icon(Icons.link),
+              ),
+            ),
+            actions: [
+              TextButton(
+                onPressed: () {
+                  Navigator.pop(context);
+                },
+                child: const Text(
+                  'لغو',
+                ),
+              ),
+              FilledButton(
+                onPressed: () {
+                  final value =
+                      controller.text.trim();
+
+                  if (value.isEmpty) {
+                    return;
+                  }
+
+                  Navigator.pop(
+                    context,
+                    value,
+                  );
+                },
+                child: const Text(
+                  'افزودن',
+                ),
+              ),
+            ],
+          ),
+        );
+      },
+    );
+
+    controller.dispose();
+
+    if (result == null ||
+        result.trim().isEmpty) {
+      return;
+    }
+
+    url.text = result.trim();
+
+    await loadSubscription();
+  }
+
   Future<void> loadSubscription({
     bool silent = false,
+    String? restoreSelectedRaw,
   }) async {
     final subscription =
         url.text.trim();
 
     if (subscription.isEmpty) {
       if (!silent && mounted) {
-        setState(() {
-          stateText =
-              'Subscription URL را وارد کن';
-        });
+        snack(
+          'ابتدا Subscription را اضافه کن',
+        );
       }
       return;
     }
@@ -294,9 +411,7 @@ class _HomePageState extends State<HomePage> {
     }
 
     try {
-      final uri = Uri.parse(
-        subscription,
-      );
+      final uri = Uri.parse(subscription);
 
       final response = await http
           .get(
@@ -311,9 +426,7 @@ class _HomePageState extends State<HomePage> {
             },
           )
           .timeout(
-            const Duration(
-              seconds: 60,
-            ),
+            const Duration(seconds: 60),
           );
 
       debugPrint(
@@ -376,6 +489,30 @@ class _HomePageState extends State<HomePage> {
         subscription,
       );
 
+      await prefs.setString(
+        'last_update',
+        DateTime.now()
+            .toLocal()
+            .toIso8601String(),
+      );
+
+      Server? restored;
+
+      final rawToRestore =
+          restoreSelectedRaw ??
+              prefs.getString(
+                'selected_server_raw',
+              );
+
+      if (rawToRestore != null) {
+        for (final server in result) {
+          if (server.raw == rawToRestore) {
+            restored = server;
+            break;
+          }
+        }
+      }
+
       if (!mounted) return;
 
       setState(() {
@@ -383,19 +520,34 @@ class _HomePageState extends State<HomePage> {
           ..clear()
           ..addAll(result);
 
+        selectedServer = restored;
+
+        lastUpdate =
+            DateTime.now()
+                .toLocal()
+                .toIso8601String();
+
         loading = false;
 
         stateText =
             '${servers.length} سرور دریافت شد';
       });
 
-      await testAll(
-        silent: true,
-      );
+      if (!silent) {
+        snack(
+          '${servers.length} سرور دریافت شد',
+        );
+      }
+
+      if (selectionMode ==
+              ServerSelectionMode.auto &&
+          !silent) {
+        await testAll(
+          silent: true,
+        );
+      }
     } catch (e) {
-      debugPrint(
-        'SUB ERROR: $e',
-      );
+      debugPrint('SUB ERROR: $e');
 
       if (!mounted) return;
 
@@ -420,8 +572,7 @@ class _HomePageState extends State<HomePage> {
     final target =
         wanted.toLowerCase();
 
-    for (final entry
-        in headers.entries) {
+    for (final entry in headers.entries) {
       if (entry.key.toLowerCase() ==
           target) {
         return entry.value;
@@ -435,47 +586,36 @@ class _HomePageState extends State<HomePage> {
   // USER INFO
   // ============================================================
 
-  void _readUserInfo(
-    String? raw,
-  ) {
+  void _readUserInfo(String? raw) {
     if (raw == null ||
         raw.trim().isEmpty) {
       return;
     }
 
-    final values =
-        <String, int>{};
+    final values = <String, int>{};
 
-    for (final item
-        in raw.split(';')) {
-      final index =
-          item.indexOf('=');
+    for (final item in raw.split(';')) {
+      final index = item.indexOf('=');
 
-      if (index <= 0) {
-        continue;
-      }
+      if (index <= 0) continue;
 
       final key = item
           .substring(0, index)
           .trim()
           .toLowerCase();
 
-      final value =
-          int.tryParse(
+      final value = int.tryParse(
         item.substring(index + 1).trim(),
       );
 
-      if (value == null) {
-        continue;
-      }
+      if (value == null) continue;
 
       if (key == 'upload') {
         values['upload'] = value;
       }
 
       if (key == 'download') {
-        values['download'] =
-            value;
+        values['download'] = value;
       }
 
       if (key == 'total' ||
@@ -493,18 +633,15 @@ class _HomePageState extends State<HomePage> {
 
     setState(() {
       if (values.containsKey('total')) {
-        totalBytes =
-            values['total'];
+        totalBytes = values['total'];
       }
 
       if (values.containsKey('upload')) {
-        uploadBytes =
-            values['upload'];
+        uploadBytes = values['upload'];
       }
 
       if (values.containsKey('download')) {
-        downloadBytes =
-            values['download'];
+        downloadBytes = values['download'];
       }
 
       if (values.containsKey('upload') ||
@@ -515,8 +652,7 @@ class _HomePageState extends State<HomePage> {
       }
 
       if (values.containsKey('expire')) {
-        expireAt =
-            values['expire'];
+        expireAt = values['expire'];
       }
     });
   }
@@ -529,12 +665,8 @@ class _HomePageState extends State<HomePage> {
     String body,
   ) {
     final direct = body
-        .split(
-          RegExp(r'\r?\n'),
-        )
-        .map(
-          (e) => e.trim(),
-        )
+        .split(RegExp(r'\r?\n'))
+        .map((e) => e.trim())
         .where(
           (e) =>
               e.isNotEmpty &&
@@ -547,22 +679,15 @@ class _HomePageState extends State<HomePage> {
     }
 
     try {
-      var encoded =
-          body.trim();
+      var encoded = body.trim();
 
       encoded = encoded
           .replaceAll(
             RegExp(r'\s+'),
             '',
           )
-          .replaceAll(
-            '-',
-            '+',
-          )
-          .replaceAll(
-            '_',
-            '/',
-          );
+          .replaceAll('-', '+')
+          .replaceAll('_', '/');
 
       encoded += '=' *
           ((4 -
@@ -575,12 +700,8 @@ class _HomePageState extends State<HomePage> {
       );
 
       return decoded
-          .split(
-            RegExp(r'\r?\n'),
-          )
-          .map(
-            (e) => e.trim(),
-          )
+          .split(RegExp(r'\r?\n'))
+          .map((e) => e.trim())
           .where(
             (e) =>
                 e.isNotEmpty &&
@@ -600,12 +721,9 @@ class _HomePageState extends State<HomePage> {
   // SERVER PARSER
   // ============================================================
 
-  Server? parseServer(
-    String raw,
-  ) {
+  Server? parseServer(String raw) {
     try {
-      final uri =
-          Uri.parse(raw);
+      final uri = Uri.parse(raw);
 
       final scheme =
           uri.scheme.toLowerCase();
@@ -643,13 +761,11 @@ class _HomePageState extends State<HomePage> {
 
       switch (scheme) {
         case 'vless':
-          outbound =
-              vless(uri);
+          outbound = vless(uri);
           break;
 
         case 'trojan':
-          outbound =
-              trojan(uri);
+          outbound = trojan(uri);
           break;
 
         case 'ss':
@@ -669,8 +785,7 @@ class _HomePageState extends State<HomePage> {
           break;
 
         case 'tuic':
-          outbound =
-              tuic(uri);
+          outbound = tuic(uri);
           break;
 
         default:
@@ -702,24 +817,15 @@ class _HomePageState extends State<HomePage> {
   // VMESS
   // ============================================================
 
-  Server? parseVmess(
-    String raw,
-  ) {
+  Server? parseVmess(String raw) {
     try {
-      var encoded =
-          raw.substring(
+      var encoded = raw.substring(
         raw.indexOf('://') + 3,
       );
 
       encoded = encoded
-          .replaceAll(
-            '-',
-            '+',
-          )
-          .replaceAll(
-            '_',
-            '/',
-          );
+          .replaceAll('-', '+')
+          .replaceAll('_', '/');
 
       encoded += '=' *
           ((4 -
@@ -809,11 +915,8 @@ class _HomePageState extends State<HomePage> {
   // VLESS
   // ============================================================
 
-  Map<String, dynamic> vless(
-    Uri uri,
-  ) {
-    final p =
-        uri.queryParameters;
+  Map<String, dynamic> vless(Uri uri) {
+    final p = uri.queryParameters;
 
     final outbound =
         <String, dynamic>{
@@ -824,12 +927,10 @@ class _HomePageState extends State<HomePage> {
       'uuid': uri.userInfo,
     };
 
-    final flow =
-        p['flow'] ?? '';
+    final flow = p['flow'] ?? '';
 
     if (flow.isNotEmpty) {
-      outbound['flow'] =
-          flow;
+      outbound['flow'] = flow;
     }
 
     final security =
@@ -847,8 +948,7 @@ class _HomePageState extends State<HomePage> {
             uri.host,
       };
 
-      final fp =
-          p['fp'] ?? '';
+      final fp = p['fp'] ?? '';
 
       if (fp.isNotEmpty) {
         tls['utls'] = {
@@ -868,8 +968,7 @@ class _HomePageState extends State<HomePage> {
         };
       }
 
-      outbound['tls'] =
-          tls;
+      outbound['tls'] = tls;
     }
 
     addTransport(
@@ -888,11 +987,8 @@ class _HomePageState extends State<HomePage> {
   // TROJAN
   // ============================================================
 
-  Map<String, dynamic> trojan(
-    Uri uri,
-  ) {
-    final p =
-        uri.queryParameters;
+  Map<String, dynamic> trojan(Uri uri) {
+    final p = uri.queryParameters;
 
     final outbound =
         <String, dynamic>{
@@ -938,8 +1034,7 @@ class _HomePageState extends State<HomePage> {
     String raw,
   ) {
     try {
-      var user =
-          uri.userInfo;
+      var user = uri.userInfo;
 
       if (user.isEmpty) {
         var encoded =
@@ -948,14 +1043,8 @@ class _HomePageState extends State<HomePage> {
         ).split('#').first;
 
         encoded = encoded
-            .replaceAll(
-              '-',
-              '+',
-            )
-            .replaceAll(
-              '_',
-              '/',
-            );
+            .replaceAll('-', '+')
+            .replaceAll('_', '/');
 
         encoded += '=' *
             ((4 -
@@ -964,9 +1053,7 @@ class _HomePageState extends State<HomePage> {
                 4);
 
         user = utf8.decode(
-          base64.decode(
-            encoded,
-          ),
+          base64.decode(encoded),
           allowMalformed: true,
         );
       }
@@ -979,12 +1066,10 @@ class _HomePageState extends State<HomePage> {
       }
 
       return {
-        'type':
-            'shadowsocks',
+        'type': 'shadowsocks',
         'tag': 'proxy',
         'server': uri.host,
-        'server_port':
-            uri.port,
+        'server_port': uri.port,
         'method':
             Uri.decodeComponent(
           user.substring(
@@ -1012,23 +1097,18 @@ class _HomePageState extends State<HomePage> {
   // HYSTERIA 2
   // ============================================================
 
-  Map<String, dynamic>
-      hysteria2(
+  Map<String, dynamic> hysteria2(
     Uri uri,
   ) {
-    final p =
-        uri.queryParameters;
+    final p = uri.queryParameters;
 
     final outbound =
         <String, dynamic>{
-      'type':
-          'hysteria2',
+      'type': 'hysteria2',
       'tag': 'proxy',
       'server': uri.host,
-      'server_port':
-          uri.port,
-      'password':
-          uri.userInfo,
+      'server_port': uri.port,
+      'password': uri.userInfo,
       'tls': {
         'enabled': true,
         'server_name':
@@ -1051,21 +1131,16 @@ class _HomePageState extends State<HomePage> {
   // TUIC
   // ============================================================
 
-  Map<String, dynamic> tuic(
-    Uri uri,
-  ) {
-    final p =
-        uri.queryParameters;
+  Map<String, dynamic> tuic(Uri uri) {
+    final p = uri.queryParameters;
 
     final outbound =
         <String, dynamic>{
       'type': 'tuic',
       'tag': 'proxy',
       'server': uri.host,
-      'server_port':
-          uri.port,
-      'uuid':
-          uri.userInfo,
+      'server_port': uri.port,
+      'uuid': uri.userInfo,
       'password':
           p['password'] ?? '',
       'congestion_control':
@@ -1074,8 +1149,7 @@ class _HomePageState extends State<HomePage> {
       'udp_relay_mode':
           p['udp_relay_mode'] ??
               'native',
-      'zero_rtt_handshake':
-          false,
+      'zero_rtt_handshake': false,
       'tls': {
         'enabled': true,
         'server_name':
@@ -1104,17 +1178,14 @@ class _HomePageState extends State<HomePage> {
     String path,
     String host,
   ) {
-    final n =
-        network.toLowerCase();
+    final n = network.toLowerCase();
 
     if (n == 'ws' ||
         n == 'websocket') {
       outbound['transport'] = {
         'type': 'ws',
         'path':
-            path.isEmpty
-                ? '/'
-                : path,
+            path.isEmpty ? '/' : path,
         if (host.isNotEmpty)
           'headers': {
             'Host': host,
@@ -1135,12 +1206,9 @@ class _HomePageState extends State<HomePage> {
 
     if (n == 'httpupgrade') {
       outbound['transport'] = {
-        'type':
-            'httpupgrade',
+        'type': 'httpupgrade',
         'path':
-            path.isEmpty
-                ? '/'
-                : path,
+            path.isEmpty ? '/' : path,
         if (host.isNotEmpty)
           'host': host,
       };
@@ -1153,9 +1221,7 @@ class _HomePageState extends State<HomePage> {
       outbound['transport'] = {
         'type': 'http',
         'path':
-            path.isEmpty
-                ? '/'
-                : path,
+            path.isEmpty ? '/' : path,
         if (host.isNotEmpty)
           'host': [host],
       };
@@ -1165,38 +1231,30 @@ class _HomePageState extends State<HomePage> {
   }
 
   // ============================================================
-  // ANDROID SING-BOX CONFIG
+  // SING-BOX CONFIG
   // ============================================================
 
-  String makeConfig(
-    Server server,
-  ) {
+  String makeConfig(Server server) {
     final proxy =
         Map<String, dynamic>.from(
       server.outbound,
     );
 
-    proxy['tag'] =
-        'proxy';
+    proxy['tag'] = 'proxy';
 
     final config =
         <String, dynamic>{
       'log': {
         'level': 'info',
       },
-
       'dns': {
         'servers': [
           {
             'type': 'https',
-            'tag':
-                'dns-remote',
-            'server':
-                '1.1.1.1',
-            'server_port':
-                443,
-            'path':
-                '/dns-query',
+            'tag': 'dns-remote',
+            'server': '1.1.1.1',
+            'server_port': 443,
+            'path': '/dns-query',
             'tls': {
               'enabled': true,
               'server_name':
@@ -1205,16 +1263,12 @@ class _HomePageState extends State<HomePage> {
           },
           {
             'type': 'local',
-            'tag':
-                'dns-local',
+            'tag': 'dns-local',
           },
         ],
-        'final':
-            'dns-remote',
-        'strategy':
-            'ipv4_only',
+        'final': 'dns-remote',
+        'strategy': 'ipv4_only',
       },
-
       'inbounds': [
         {
           'type': 'tun',
@@ -1227,7 +1281,6 @@ class _HomePageState extends State<HomePage> {
           'stack': 'system',
         },
       ],
-
       'outbounds': [
         proxy,
         {
@@ -1239,39 +1292,30 @@ class _HomePageState extends State<HomePage> {
           'tag': 'block',
         },
       ],
-
       'route': {
         'rules': [
           {
-            'protocol':
-                'dns',
-            'action':
-                'hijack-dns',
+            'protocol': 'dns',
+            'action': 'hijack-dns',
           },
           {
             'port': 53,
-            'action':
-                'hijack-dns',
+            'action': 'hijack-dns',
           },
           {
-            'ip_is_private':
-                true,
-            'outbound':
-                'direct',
+            'ip_is_private': true,
+            'outbound': 'direct',
           },
         ],
-        'final':
-            'proxy',
+        'final': 'proxy',
       },
     };
 
-    return jsonEncode(
-      config,
-    );
+    return jsonEncode(config);
   }
 
   // ============================================================
-  // TEST SERVERS
+  // PING ALL
   // ============================================================
 
   Future<void> testAll({
@@ -1289,35 +1333,44 @@ class _HomePageState extends State<HomePage> {
       });
     }
 
-    for (final server
-        in servers) {
-      final stopwatch =
-          Stopwatch()..start();
-
-      try {
-        final socket =
-            await Socket.connect(
-          server.host,
-          server.port,
-          timeout:
-              const Duration(
-            seconds: 3,
-          ),
-        );
-
-        socket.destroy();
-
-        server.ping =
-            stopwatch
-                .elapsedMilliseconds;
-      } catch (_) {
-        server.ping = null;
-      }
-
-      if (mounted && !silent) {
-        setState(() {});
-      }
+    if (silent && mounted) {
+      setState(() {
+        testing = true;
+      });
     }
+
+    await Future.wait(
+      servers.map(
+        (server) async {
+          final stopwatch =
+              Stopwatch()..start();
+
+          try {
+            final socket =
+                await Socket.connect(
+              server.host,
+              server.port,
+              timeout:
+                  const Duration(
+                seconds: 4,
+              ),
+            );
+
+            socket.destroy();
+
+            server.ping =
+                stopwatch
+                    .elapsedMilliseconds;
+          } catch (_) {
+            server.ping = null;
+          }
+
+          if (mounted) {
+            setState(() {});
+          }
+        },
+      ),
+    );
 
     if (mounted) {
       setState(() {
@@ -1332,7 +1385,7 @@ class _HomePageState extends State<HomePage> {
   }
 
   // ============================================================
-  // FASTEST
+  // FASTEST SERVER
   // ============================================================
 
   Server? fastest() {
@@ -1357,19 +1410,90 @@ class _HomePageState extends State<HomePage> {
   }
 
   // ============================================================
+  // SELECT SERVER
+  // ============================================================
+
+  Future<void> selectManualServer(
+    Server server,
+  ) async {
+    if (connected || connecting) {
+      snack(
+        'ابتدا VPN را قطع کن',
+      );
+      return;
+    }
+
+    setState(() {
+      selectionMode =
+          ServerSelectionMode.manual;
+
+      selectedServer = server;
+
+      stateText =
+          'سرور انتخاب شد: ${server.name}';
+    });
+
+    await saveSelectionMode();
+    await saveSelectedServer();
+
+    snack(
+      'سرور ${server.name} انتخاب شد',
+    );
+  }
+
+  Future<void> selectAutoMode() async {
+    if (connected || connecting) {
+      snack(
+        'ابتدا VPN را قطع کن',
+      );
+      return;
+    }
+
+    setState(() {
+      selectionMode =
+          ServerSelectionMode.auto;
+      stateText =
+          'حالت انتخاب خودکار فعال شد';
+    });
+
+    await saveSelectionMode();
+
+    if (servers.isNotEmpty) {
+      await testAll(
+        silent: true,
+      );
+
+      final best = fastest();
+
+      if (mounted) {
+        setState(() {
+          selectedServer = best;
+        });
+      }
+
+      await saveSelectedServer();
+
+      if (best != null) {
+        snack(
+          'سریع‌ترین سرور: ${best.name} • ${best.ping} ms',
+        );
+      }
+    }
+  }
+
+  // ============================================================
   // CONNECT
   // ============================================================
 
   Future<void> connect() async {
     if (servers.isEmpty) {
       snack(
-        'ابتدا Subscription را دریافت کن',
+        'ابتدا Subscription را اضافه کن',
       );
       return;
     }
 
-    if (connected ||
-        connecting) {
+    if (connected || connecting) {
       return;
     }
 
@@ -1380,19 +1504,40 @@ class _HomePageState extends State<HomePage> {
     });
 
     try {
-      if (servers.every(
-        (s) => s.ping == null,
-      )) {
+      Server? selected;
+
+      if (selectionMode ==
+              ServerSelectionMode.manual &&
+          selectedServer != null) {
+        selected = selectedServer;
+      } else {
+        setState(() {
+          stateText =
+              'در حال پیدا کردن سریع‌ترین سرور...';
+        });
+
         await testAll(
           silent: true,
         );
+
+        selected = fastest();
+
+        selected ??= servers.first;
+
+        if (mounted) {
+          setState(() {
+            selectedServer = selected;
+          });
+        }
+
+        await saveSelectedServer();
       }
 
-      Server? selected =
-          fastest();
-
-      selected ??=
-          servers.first;
+      if (selected == null) {
+        throw Exception(
+          'سروری برای اتصال وجود ندارد',
+        );
+      }
 
       debugPrint(
         'SELECTED SERVER: '
@@ -1401,10 +1546,12 @@ class _HomePageState extends State<HomePage> {
         '${selected.host}:${selected.port}',
       );
 
-      setState(() {
-        stateText =
-            'سرور: ${selected!.name}';
-      });
+      if (mounted) {
+        setState(() {
+          stateText =
+              'سرور: ${selected!.name}';
+        });
+      }
 
       final permission =
           await vpn.requestVPNPermission();
@@ -1422,19 +1569,21 @@ class _HomePageState extends State<HomePage> {
         'SINGBOX CONFIG:\n$config',
       );
 
-      setState(() {
-        stateText =
-            'در حال بررسی کانفیگ...';
-      });
+      if (mounted) {
+        setState(() {
+          stateText =
+              'در حال بررسی کانفیگ...';
+        });
+      }
 
-      await vpn.checkConfig(
-        config,
-      );
+      await vpn.checkConfig(config);
 
-      setState(() {
-        stateText =
-            'در حال اتصال به سرور...';
-      });
+      if (mounted) {
+        setState(() {
+          stateText =
+              'در حال اتصال به سرور...';
+        });
+      }
 
       await vpn.connect(
         SessionOptions(
@@ -1444,7 +1593,7 @@ class _HomePageState extends State<HomePage> {
           notification:
               NotificationConfig(
             title:
-                'Light speed 🔥',
+                'Light speed',
             showTrafficStats:
                 true,
             showStopButton:
@@ -1532,9 +1681,7 @@ class _HomePageState extends State<HomePage> {
   // SPEED
   // ============================================================
 
-  String speed(
-    dynamic bps,
-  ) {
+  String speed(dynamic bps) {
     final value =
         bps is num
             ? bps.toDouble()
@@ -1544,14 +1691,12 @@ class _HomePageState extends State<HomePage> {
       return '0 Mbps';
     }
 
-    if (value >=
-        1000000000) {
+    if (value >= 1000000000) {
       return
           '${(value / 1000000000).toStringAsFixed(2)} Gbps';
     }
 
-    if (value >=
-        1000000) {
+    if (value >= 1000000) {
       return
           '${(value / 1000000).toStringAsFixed(2)} Mbps';
     }
@@ -1569,9 +1714,7 @@ class _HomePageState extends State<HomePage> {
   // SIZE
   // ============================================================
 
-  String size(
-    int? bytes,
-  ) {
+  String size(int? bytes) {
     if (bytes == null) {
       return 'نامشخص';
     }
@@ -1580,8 +1723,7 @@ class _HomePageState extends State<HomePage> {
       return '0 B';
     }
 
-    if (bytes <
-        1024 * 1024) {
+    if (bytes < 1024 * 1024) {
       return
           '${(bytes / 1024).toStringAsFixed(1)} KB';
     }
@@ -1602,13 +1744,10 @@ class _HomePageState extends State<HomePage> {
   // DATE
   // ============================================================
 
-  String _dateFromUnix(
-    int timestamp,
-  ) {
+  String _dateFromUnix(int timestamp) {
     try {
       final milliseconds =
-          timestamp >
-                  20000000000
+          timestamp > 20000000000
               ? timestamp
               : timestamp * 1000;
 
@@ -1630,9 +1769,7 @@ class _HomePageState extends State<HomePage> {
   // STATE
   // ============================================================
 
-  String _prettyState(
-    String value,
-  ) {
+  String _prettyState(String value) {
     final low =
         value.toLowerCase();
 
@@ -1662,22 +1799,38 @@ class _HomePageState extends State<HomePage> {
   // SNACK
   // ============================================================
 
-  void snack(
-    String text,
-  ) {
+  void snack(String text) {
     if (!mounted) return;
 
-    ScaffoldMessenger.of(
-      context,
-    ).showSnackBar(
+    ScaffoldMessenger.of(context)
+        .showSnackBar(
       SnackBar(
-        content:
-            Text(text),
+        content: Text(text),
         duration:
-            const Duration(
-          seconds: 4,
+            const Duration(seconds: 4),
+        behavior:
+            SnackBarBehavior.floating,
+        shape:
+            RoundedRectangleBorder(
+          borderRadius:
+              BorderRadius.circular(16),
         ),
       ),
+    );
+  }
+
+  // ============================================================
+  // GRADIENT
+  // ============================================================
+
+  LinearGradient get mainGradient {
+    return const LinearGradient(
+      begin: Alignment.topLeft,
+      end: Alignment.bottomRight,
+      colors: [
+        Color(0xFF00E5FF),
+        Color(0xFF7C4DFF),
+      ],
     );
   }
 
@@ -1686,32 +1839,41 @@ class _HomePageState extends State<HomePage> {
   // ============================================================
 
   Widget card(
-    Widget child,
-  ) {
+    Widget child, {
+    EdgeInsetsGeometry? padding,
+  }) {
     return Container(
       margin:
           const EdgeInsets.only(
         bottom: 12,
       ),
       padding:
-          const EdgeInsets.all(16),
+          padding ??
+              const EdgeInsets.all(16),
       decoration:
           BoxDecoration(
         color:
-            const Color(
-          0xFF0D1728,
-        ),
+            const Color(0xFF0D121D),
         borderRadius:
-            BorderRadius.circular(
-          22,
-        ),
+            BorderRadius.circular(22),
         border:
             Border.all(
           color:
               Colors.white.withValues(
-            alpha: .05,
+            alpha: .06,
           ),
         ),
+        boxShadow: [
+          BoxShadow(
+            color:
+                Colors.black.withValues(
+              alpha: .18,
+            ),
+            blurRadius: 18,
+            offset:
+                const Offset(0, 8),
+          ),
+        ],
       ),
       child: child,
     );
@@ -1733,29 +1895,32 @@ class _HomePageState extends State<HomePage> {
       child: Row(
         children: [
           Container(
-            width: 46,
-            height: 46,
+            width: 48,
+            height: 48,
             decoration:
-                const BoxDecoration(
+                BoxDecoration(
               shape:
                   BoxShape.circle,
               gradient:
-                  LinearGradient(
-                colors: [
-                  Color(
-                    0xFF00E5FF,
-                  ),
-                  Color(
+                  mainGradient,
+              boxShadow: [
+                BoxShadow(
+                  color:
+                      const Color(
                     0xFF7C4DFF,
+                  ).withValues(
+                    alpha: .3,
                   ),
-                ],
-              ),
+                  blurRadius: 18,
+                ),
+              ],
             ),
             child:
                 const Icon(
               Icons.bolt,
               color:
                   Colors.white,
+              size: 27,
             ),
           ),
           const SizedBox(
@@ -1770,10 +1935,13 @@ class _HomePageState extends State<HomePage> {
                 title,
                 style:
                     const TextStyle(
-                  fontSize: 22,
+                  fontSize: 23,
                   fontWeight:
-                      FontWeight.w800,
+                      FontWeight.w900,
                 ),
+              ),
+              const SizedBox(
+                height: 2,
               ),
               Text(
                 subtitle,
@@ -1781,6 +1949,7 @@ class _HomePageState extends State<HomePage> {
                     const TextStyle(
                   color:
                       Colors.white54,
+                  fontSize: 13,
                 ),
               ),
             ],
@@ -1811,13 +1980,16 @@ class _HomePageState extends State<HomePage> {
           TextDirection.rtl,
       child: Scaffold(
         body: SafeArea(
-          child:
-              pages[page],
+          child: pages[page],
         ),
         bottomNavigationBar:
             NavigationBar(
-          selectedIndex:
-              page,
+          height: 72,
+          selectedIndex: page,
+          backgroundColor:
+              const Color(0xFF090D15),
+          indicatorColor:
+              const Color(0xFF34216B),
           onDestinationSelected:
               (index) {
             setState(() {
@@ -1827,55 +1999,38 @@ class _HomePageState extends State<HomePage> {
           destinations:
               const [
             NavigationDestination(
-              icon: Icon(
-                Icons.home_outlined,
-              ),
+              icon:
+                  Icon(Icons.home_outlined),
               selectedIcon:
-                  Icon(
-                Icons.home,
-              ),
+                  Icon(Icons.home),
               label: 'خانه',
             ),
             NavigationDestination(
-              icon: Icon(
-                Icons.dns_outlined,
-              ),
+              icon:
+                  Icon(Icons.dns_outlined),
               selectedIcon:
-                  Icon(
-                Icons.dns,
-              ),
+                  Icon(Icons.dns),
               label: 'سرورها',
             ),
             NavigationDestination(
-              icon: Icon(
-                Icons
-                    .bar_chart_outlined,
-              ),
+              icon:
+                  Icon(Icons.bar_chart_outlined),
               selectedIcon:
-                  Icon(
-                Icons.bar_chart,
-              ),
+                  Icon(Icons.bar_chart),
               label: 'ترافیک',
             ),
             NavigationDestination(
-              icon: Icon(
-                Icons.link_outlined,
-              ),
+              icon:
+                  Icon(Icons.link_outlined),
               selectedIcon:
-                  Icon(
-                Icons.link,
-              ),
+                  Icon(Icons.link),
               label: 'اشتراک',
             ),
             NavigationDestination(
-              icon: Icon(
-                Icons
-                    .settings_outlined,
-              ),
+              icon:
+                  Icon(Icons.settings_outlined),
               selectedIcon:
-                  Icon(
-                Icons.settings,
-              ),
+                  Icon(Icons.settings),
               label: 'تنظیمات',
             ),
           ],
@@ -1889,275 +2044,95 @@ class _HomePageState extends State<HomePage> {
   // ============================================================
 
   Widget _home() {
-    final best =
-        fastest();
+    final best = fastest();
+
+    final displayServer =
+        selectionMode ==
+                ServerSelectionMode.manual
+            ? selectedServer
+            : selectedServer ?? best;
 
     final percent =
         totalBytes == null ||
                 totalBytes! <= 0
             ? 0.0
-            : ((usedBytes ??
-                        0) /
+            : ((usedBytes ?? 0) /
                     totalBytes!)
-                .clamp(
-                  0.0,
-                  1.0,
-                );
+                .clamp(0.0, 1.0);
 
     return ListView(
       padding:
-          const EdgeInsets.all(
+          const EdgeInsets.fromLTRB(
         18,
+        18,
+        18,
+        24,
       ),
       children: [
         header(
-          'Light speed 🔥',
+          'Light speed',
           'VPN واقعی با sing-box',
         ),
 
         const SizedBox(
-          height: 8,
+          height: 4,
         ),
 
-        Center(
-          child:
-              GestureDetector(
-            onTap:
-                connecting
-                    ? null
-                    : connected
-                        ? disconnect
-                        : connect,
-            child:
-                Container(
-              width: 200,
-              height: 200,
-              decoration:
-                  BoxDecoration(
-                shape:
-                    BoxShape.circle,
-                gradient:
-                    LinearGradient(
-                  colors:
-                      connected
-                          ? const [
-                              Color(
-                                0xFF00E676,
-                              ),
-                              Color(
-                                0xFF00B8D4,
-                              ),
-                            ]
-                          : const [
-                              Color(
-                                0xFF00E5FF,
-                              ),
-                              Color(
-                                0xFF7C4DFF,
-                              ),
-                            ],
-                ),
-                boxShadow: [
-                  BoxShadow(
-                    color:
-                        (connected
-                                ? const Color(
-                                    0xFF00E676,
-                                  )
-                                : const Color(
-                                    0xFF00E5FF,
-                                  ))
-                            .withValues(
-                      alpha: .35,
-                    ),
-                    blurRadius:
-                        40,
-                    spreadRadius:
-                        8,
-                  ),
-                ],
-              ),
-              child:
-                  Center(
-                child:
-                    Container(
-                  width: 176,
-                  height: 176,
-                  decoration:
-                      const BoxDecoration(
-                    shape:
-                        BoxShape.circle,
-                    color:
-                        Color(
-                      0xFF081322,
-                    ),
-                  ),
-                  child:
-                      Center(
-                    child:
-                        connecting
-                            ? const CircularProgressIndicator()
-                            : Column(
-                                mainAxisAlignment:
-                                    MainAxisAlignment.center,
-                                children: [
-                                  Icon(
-                                    connected
-                                        ? Icons.power
-                                        : Icons.bolt,
-                                    size: 48,
-                                    color:
-                                        connected
-                                            ? const Color(
-                                                0xFF00E676,
-                                              )
-                                            : const Color(
-                                                0xFF00E5FF,
-                                              ),
-                                  ),
-                                  const SizedBox(
-                                    height: 8,
-                                  ),
-                                  Text(
-                                    connected
-                                        ? 'قطع اتصال'
-                                        : 'اتصال',
-                                    style:
-                                        const TextStyle(
-                                      fontSize: 18,
-                                      fontWeight:
-                                          FontWeight.bold,
-                                    ),
-                                  ),
-                                ],
-                              ),
-                  ),
-                ),
-              ),
-            ),
-          ),
-        ),
+        _connectionHero(),
 
         const SizedBox(
-          height: 16,
+          height: 18,
         ),
 
         Center(
-          child:
-              Text(
+          child: Text(
             stateText,
             textAlign:
                 TextAlign.center,
-            style:
-                TextStyle(
-              color:
-                  connected
-                      ? const Color(
-                          0xFF00E676,
-                        )
-                      : Colors.white70,
+            style: TextStyle(
+              color: connected
+                  ? const Color(
+                      0xFF00E676,
+                    )
+                  : Colors.white70,
+              fontWeight:
+                  FontWeight.w600,
             ),
           ),
         ),
 
         const SizedBox(
-          height: 20,
+          height: 18,
         ),
 
-        card(
-          Row(
-            children: [
-              const Icon(
-                Icons.public,
-                color:
-                    Color(
-                  0xFF00E5FF,
-                ),
-              ),
-              const SizedBox(
-                width: 12,
-              ),
-              Expanded(
-                child:
-                    Column(
-                  crossAxisAlignment:
-                      CrossAxisAlignment
-                          .start,
-                  children: [
-                    const Text(
-                      'سرور انتخاب‌شده',
-                      style:
-                          TextStyle(
-                        color:
-                            Colors.white54,
-                      ),
-                    ),
-                    Text(
-                      best?.name ??
-                          'هنوز انتخاب نشده',
-                      maxLines: 1,
-                      overflow:
-                          TextOverflow
-                              .ellipsis,
-                    ),
-                  ],
-                ),
-              ),
-              if (best?.ping !=
-                  null)
-                Text(
-                  '${best!.ping} ms',
-                ),
-            ],
-          ),
+        _modeSelector(),
+
+        const SizedBox(
+          height: 10,
+        ),
+
+        _selectedServerCard(
+          displayServer,
+        ),
+
+        const SizedBox(
+          height: 4,
         ),
 
         Row(
           children: [
             Expanded(
               child:
-                  card(
-                Column(
-                  crossAxisAlignment:
-                      CrossAxisAlignment
-                          .start,
-                  children: [
-                    const Row(
-                      children: [
-                        Icon(
-                          Icons.download,
-                          size: 18,
-                          color:
-                              Color(
-                            0xFF00E5FF,
-                          ),
-                        ),
-                        SizedBox(
-                          width: 6,
-                        ),
-                        Text(
-                          'دانلود',
-                          style:
-                              TextStyle(
-                            color:
-                                Colors.white54,
-                          ),
-                        ),
-                      ],
-                    ),
-                    const SizedBox(
-                      height: 8,
-                    ),
-                    Text(
-                      download,
-                      style:
-                          const TextStyle(
-                        fontSize: 18,
-                        fontWeight:
-                            FontWeight.bold,
-                      ),
-                    ),
-                  ],
+                  _statCard(
+                icon:
+                    Icons.download_rounded,
+                title:
+                    'دانلود',
+                value:
+                    download,
+                iconColor:
+                    const Color(
+                  0xFF00E5FF,
                 ),
               ),
             ),
@@ -2166,48 +2141,16 @@ class _HomePageState extends State<HomePage> {
             ),
             Expanded(
               child:
-                  card(
-                Column(
-                  crossAxisAlignment:
-                      CrossAxisAlignment
-                          .start,
-                  children: [
-                    const Row(
-                      children: [
-                        Icon(
-                          Icons.upload,
-                          size: 18,
-                          color:
-                              Color(
-                            0xFF7C4DFF,
-                          ),
-                        ),
-                        SizedBox(
-                          width: 6,
-                        ),
-                        Text(
-                          'آپلود',
-                          style:
-                              TextStyle(
-                            color:
-                                Colors.white54,
-                          ),
-                        ),
-                      ],
-                    ),
-                    const SizedBox(
-                      height: 8,
-                    ),
-                    Text(
-                      upload,
-                      style:
-                          const TextStyle(
-                        fontSize: 18,
-                        fontWeight:
-                            FontWeight.bold,
-                      ),
-                    ),
-                  ],
+                  _statCard(
+                icon:
+                    Icons.upload_rounded,
+                title:
+                    'آپلود',
+                value:
+                    upload,
+                iconColor:
+                    const Color(
+                  0xFF9C6CFF,
                 ),
               ),
             ),
@@ -2216,48 +2159,121 @@ class _HomePageState extends State<HomePage> {
 
         card(
           Column(
-            crossAxisAlignment:
-                CrossAxisAlignment
-                    .start,
             children: [
               Row(
                 children: [
-                  const Icon(
-                    Icons.data_usage,
-                    color:
-                        Color(
-                      0xFF7C4DFF,
+                  Container(
+                    width: 42,
+                    height: 42,
+                    decoration:
+                        BoxDecoration(
+                      borderRadius:
+                          BorderRadius
+                              .circular(
+                        14,
+                      ),
+                      color:
+                          const Color(
+                        0xFF7C4DFF,
+                      ).withValues(
+                        alpha: .12,
+                      ),
+                    ),
+                    child:
+                        const Icon(
+                      Icons.data_usage,
+                      color:
+                          Color(
+                        0xFF9C6CFF,
+                      ),
                     ),
                   ),
                   const SizedBox(
-                    width: 8,
+                    width: 12,
                   ),
                   const Expanded(
                     child:
+                        Column(
+                      crossAxisAlignment:
+                          CrossAxisAlignment
+                              .start,
+                      children: [
                         Text(
-                      'حجم اشتراک',
+                          'حجم اشتراک',
+                          style:
+                              TextStyle(
+                            fontWeight:
+                                FontWeight
+                                    .bold,
+                          ),
+                        ),
+                        SizedBox(
+                          height: 3,
+                        ),
+                        Text(
+                          'مصرف اینترنت',
+                          style:
+                              TextStyle(
+                            color:
+                                Colors.white54,
+                            fontSize: 12,
+                          ),
+                        ),
+                      ],
                     ),
                   ),
                   Text(
-                    size(
-                      totalBytes,
+                    size(totalBytes),
+                    style:
+                        const TextStyle(
+                      fontWeight:
+                          FontWeight.bold,
                     ),
                   ),
                 ],
               ),
               const SizedBox(
-                height: 12,
+                height: 14,
               ),
-              LinearProgressIndicator(
-                value:
-                    percent,
-                minHeight: 9,
+              ClipRRect(
+                borderRadius:
+                    BorderRadius.circular(
+                  20,
+                ),
+                child:
+                    LinearProgressIndicator(
+                  value: percent,
+                  minHeight: 8,
+                  backgroundColor:
+                      Colors.white
+                          .withValues(
+                    alpha: .06,
+                  ),
+                ),
               ),
               const SizedBox(
                 height: 10,
               ),
-              Text(
-                'مصرف: ${size(usedBytes)}',
+              Row(
+                children: [
+                  const Text(
+                    'مصرف شده',
+                    style:
+                        TextStyle(
+                      color:
+                          Colors.white54,
+                      fontSize: 12,
+                    ),
+                  ),
+                  const Spacer(),
+                  Text(
+                    size(usedBytes),
+                    style:
+                        const TextStyle(
+                      fontSize: 12,
+                    ),
+                  ),
+                ],
               ),
             ],
           ),
@@ -2267,14 +2283,479 @@ class _HomePageState extends State<HomePage> {
   }
 
   // ============================================================
-  // SERVERS
+  // CONNECTION HERO
+  // ============================================================
+
+  Widget _connectionHero() {
+    return Center(
+      child: GestureDetector(
+        onTap:
+            connecting
+                ? null
+                : connected
+                    ? disconnect
+                    : connect,
+        child: Container(
+          width: 225,
+          height: 225,
+          decoration:
+              BoxDecoration(
+            shape:
+                BoxShape.circle,
+            gradient:
+                connected
+                    ? const LinearGradient(
+                        colors: [
+                          Color(
+                            0xFF00E676,
+                          ),
+                          Color(
+                            0xFF00B8D4,
+                          ),
+                        ],
+                      )
+                    : mainGradient,
+            boxShadow: [
+              BoxShadow(
+                color:
+                    (connected
+                            ? const Color(
+                                0xFF00E676,
+                              )
+                            : const Color(
+                                0xFF7C4DFF,
+                              ))
+                        .withValues(
+                  alpha: .30,
+                ),
+                blurRadius: 45,
+                spreadRadius: 8,
+              ),
+            ],
+          ),
+          child: Center(
+            child: Container(
+              width: 199,
+              height: 199,
+              decoration:
+                  const BoxDecoration(
+                shape:
+                    BoxShape.circle,
+                color:
+                    Color(0xFF080C14),
+              ),
+              child: Center(
+                child:
+                    connecting
+                        ? Column(
+                            mainAxisAlignment:
+                                MainAxisAlignment
+                                    .center,
+                            children: [
+                              const SizedBox(
+                                width: 42,
+                                height: 42,
+                                child:
+                                    CircularProgressIndicator(
+                                  strokeWidth:
+                                      3,
+                                ),
+                              ),
+                              const SizedBox(
+                                height: 14,
+                              ),
+                              const Text(
+                                'در حال اتصال',
+                                style:
+                                    TextStyle(
+                                  fontWeight:
+                                      FontWeight
+                                          .bold,
+                                ),
+                              ),
+                            ],
+                          )
+                        : Column(
+                            mainAxisAlignment:
+                                MainAxisAlignment
+                                    .center,
+                            children: [
+                              Icon(
+                                connected
+                                    ? Icons
+                                        .power_settings_new
+                                    : Icons
+                                        .power_settings_new,
+                                size: 58,
+                                color:
+                                    connected
+                                        ? const Color(
+                                            0xFF00E676,
+                                          )
+                                        : const Color(
+                                            0xFF9C6CFF,
+                                          ),
+                              ),
+                              const SizedBox(
+                                height: 10,
+                              ),
+                              Text(
+                                connected
+                                    ? 'قطع اتصال'
+                                    : 'اتصال',
+                                style:
+                                    const TextStyle(
+                                  fontSize:
+                                      18,
+                                  fontWeight:
+                                      FontWeight
+                                          .w800,
+                                ),
+                              ),
+                              const SizedBox(
+                                height: 4,
+                              ),
+                              Text(
+                                connected
+                                    ? 'VPN فعال است'
+                                    : 'برای اتصال لمس کنید',
+                                style:
+                                    const TextStyle(
+                                  color:
+                                      Colors
+                                          .white54,
+                                  fontSize:
+                                      11,
+                                ),
+                              ),
+                            ],
+                          ),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  // ============================================================
+  // MODE SELECTOR
+  // ============================================================
+
+  Widget _modeSelector() {
+    return card(
+      Row(
+        children: [
+          Expanded(
+            child: _modeButton(
+              icon: Icons.auto_awesome,
+              title: 'خودکار',
+              subtitle:
+                  'سریع‌ترین سرور',
+              active:
+                  selectionMode ==
+                      ServerSelectionMode
+                          .auto,
+              onTap:
+                  selectAutoMode,
+            ),
+          ),
+          const SizedBox(
+            width: 10,
+          ),
+          Expanded(
+            child: _modeButton(
+              icon: Icons.touch_app,
+              title: 'دستی',
+              subtitle:
+                  'انتخاب سرور',
+              active:
+                  selectionMode ==
+                      ServerSelectionMode
+                          .manual,
+              onTap: () {
+                setState(() {
+                  page = 1;
+                });
+              },
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _modeButton({
+    required IconData icon,
+    required String title,
+    required String subtitle,
+    required bool active,
+    required VoidCallback onTap,
+  }) {
+    return InkWell(
+      onTap: onTap,
+      borderRadius:
+          BorderRadius.circular(18),
+      child: AnimatedContainer(
+        duration:
+            const Duration(
+          milliseconds: 200,
+        ),
+        padding:
+            const EdgeInsets.all(13),
+        decoration:
+            BoxDecoration(
+          borderRadius:
+              BorderRadius.circular(18),
+          gradient:
+              active
+                  ? mainGradient
+                  : null,
+          color:
+              active
+                  ? null
+                  : const Color(
+                      0xFF151B28,
+                    ),
+        ),
+        child: Row(
+          children: [
+            Icon(
+              icon,
+              color:
+                  active
+                      ? Colors.white
+                      : Colors.white60,
+            ),
+            const SizedBox(
+              width: 8,
+            ),
+            Expanded(
+              child: Column(
+                crossAxisAlignment:
+                    CrossAxisAlignment
+                        .start,
+                children: [
+                  Text(
+                    title,
+                    style:
+                        const TextStyle(
+                      fontWeight:
+                          FontWeight.bold,
+                    ),
+                  ),
+                  Text(
+                    subtitle,
+                    style:
+                        TextStyle(
+                      color:
+                          active
+                              ? Colors.white70
+                              : Colors.white38,
+                      fontSize: 10,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  // ============================================================
+  // SELECTED SERVER
+  // ============================================================
+
+  Widget _selectedServerCard(
+    Server? server,
+  ) {
+    return card(
+      InkWell(
+        onTap: () {
+          setState(() {
+            page = 1;
+          });
+        },
+        borderRadius:
+            BorderRadius.circular(18),
+        child: Row(
+          children: [
+            Container(
+              width: 48,
+              height: 48,
+              decoration:
+                  BoxDecoration(
+                borderRadius:
+                    BorderRadius.circular(
+                  15,
+                ),
+                gradient:
+                    mainGradient,
+              ),
+              child:
+                  const Icon(
+                Icons.public,
+                color:
+                    Colors.white,
+              ),
+            ),
+            const SizedBox(
+              width: 12,
+            ),
+            Expanded(
+              child:
+                  Column(
+                crossAxisAlignment:
+                    CrossAxisAlignment
+                        .start,
+                children: [
+                  Text(
+                    selectionMode ==
+                            ServerSelectionMode
+                                .auto
+                        ? 'سرور سریع‌ترین'
+                        : 'سرور انتخاب‌شده',
+                    style:
+                        const TextStyle(
+                      color:
+                          Colors.white54,
+                      fontSize: 11,
+                    ),
+                  ),
+                  const SizedBox(
+                    height: 4,
+                  ),
+                  Text(
+                    server?.name ??
+                        'هنوز سروری انتخاب نشده',
+                    maxLines: 1,
+                    overflow:
+                        TextOverflow
+                            .ellipsis,
+                    style:
+                        const TextStyle(
+                      fontWeight:
+                          FontWeight.bold,
+                    ),
+                  ),
+                  if (server != null)
+                    Text(
+                      '${server.type} • ${server.host}',
+                      maxLines: 1,
+                      overflow:
+                          TextOverflow
+                              .ellipsis,
+                      style:
+                          const TextStyle(
+                        color:
+                            Colors.white38,
+                        fontSize: 10,
+                      ),
+                    ),
+                ],
+              ),
+            ),
+            if (server?.ping != null)
+              Column(
+                children: [
+                  Text(
+                    '${server!.ping}',
+                    style:
+                        const TextStyle(
+                      fontWeight:
+                          FontWeight.bold,
+                    ),
+                  ),
+                  const Text(
+                    'ms',
+                    style:
+                        TextStyle(
+                      color:
+                          Colors.white38,
+                      fontSize: 10,
+                    ),
+                  ),
+                ],
+              )
+            else
+              const Icon(
+                Icons.chevron_left,
+                color:
+                    Colors.white38,
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  // ============================================================
+  // STAT CARD
+  // ============================================================
+
+  Widget _statCard({
+    required IconData icon,
+    required String title,
+    required String value,
+    required Color iconColor,
+  }) {
+    return card(
+      Column(
+        crossAxisAlignment:
+            CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Icon(
+                icon,
+                color: iconColor,
+                size: 20,
+              ),
+              const SizedBox(
+                width: 6,
+              ),
+              Text(
+                title,
+                style:
+                    const TextStyle(
+                  color:
+                      Colors.white54,
+                  fontSize: 12,
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(
+            height: 9,
+          ),
+          Text(
+            value,
+            style:
+                const TextStyle(
+              fontSize: 17,
+              fontWeight:
+                  FontWeight.w800,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  // ============================================================
+  // SERVERS PAGE
   // ============================================================
 
   Widget _servers() {
     return ListView(
       padding:
-          const EdgeInsets.all(
+          const EdgeInsets.fromLTRB(
         18,
+        18,
+        18,
+        24,
       ),
       children: [
         header(
@@ -2282,42 +2763,131 @@ class _HomePageState extends State<HomePage> {
           '${servers.length} سرور',
         ),
 
-        FilledButton.icon(
-          onPressed:
-              testing
-                  ? null
-                  : () =>
-                      testAll(),
-          icon:
-              const Icon(
-            Icons.speed,
-          ),
-          label:
-              Text(
-            testing
-                ? 'در حال تست...'
-                : 'تست Ping',
+        card(
+          Column(
+            children: [
+              Row(
+                children: [
+                  const Icon(
+                    Icons.auto_awesome,
+                    color:
+                        Color(0xFF00E5FF),
+                  ),
+                  const SizedBox(
+                    width: 10,
+                  ),
+                  const Expanded(
+                    child:
+                        Column(
+                      crossAxisAlignment:
+                          CrossAxisAlignment
+                              .start,
+                      children: [
+                        Text(
+                          'انتخاب سریع‌ترین',
+                          style:
+                              TextStyle(
+                            fontWeight:
+                                FontWeight
+                                    .bold,
+                          ),
+                        ),
+                        SizedBox(
+                          height: 3,
+                        ),
+                        Text(
+                          'تست همه سرورها و انتخاب کمترین Ping',
+                          style:
+                              TextStyle(
+                            color:
+                                Colors.white54,
+                            fontSize:
+                                11,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                  Switch(
+                    value:
+                        selectionMode ==
+                            ServerSelectionMode
+                                .auto,
+                    onChanged:
+                        (_) =>
+                            selectAutoMode(),
+                  ),
+                ],
+              ),
+              const SizedBox(
+                height: 12,
+              ),
+              SizedBox(
+                width:
+                    double.infinity,
+                child:
+                    OutlinedButton.icon(
+                  onPressed:
+                      testing
+                          ? null
+                          : () =>
+                              testAll(),
+                  icon:
+                      const Icon(
+                    Icons.speed,
+                  ),
+                  label:
+                      Text(
+                    testing
+                        ? 'در حال تست...'
+                        : 'تست Ping سرورها',
+                  ),
+                ),
+              ),
+            ],
           ),
         ),
 
         const SizedBox(
-          height: 14,
+          height: 4,
         ),
 
         if (servers.isEmpty)
           card(
-            const Center(
-              child:
-                  Padding(
-                padding:
-                    EdgeInsets.all(
-                  20,
+            Column(
+              children: [
+                const Icon(
+                  Icons.dns_outlined,
+                  size: 50,
+                  color:
+                      Colors.white24,
                 ),
-                child:
-                    Text(
-                  'هنوز سروری دریافت نشده است',
+                const SizedBox(
+                  height: 12,
                 ),
-              ),
+                const Text(
+                  'هنوز سروری دریافت نشده',
+                ),
+                const SizedBox(
+                  height: 14,
+                ),
+                FilledButton.icon(
+                  onPressed:
+                      () {
+                    setState(() {
+                      page = 3;
+                    });
+                  },
+                  icon:
+                      const Icon(
+                    Icons.add_link,
+                  ),
+                  label:
+                      const Text(
+                    'افزودن Subscription',
+                  ),
+                ),
+              ],
             ),
           ),
 
@@ -2329,39 +2899,14 @@ class _HomePageState extends State<HomePage> {
             final server =
                 entry.value;
 
-            return card(
-              ListTile(
-                contentPadding:
-                    EdgeInsets.zero,
-                leading:
-                    CircleAvatar(
-                  child:
-                      Text(
-                    '${entry.key + 1}',
-                  ),
-                ),
-                title:
-                    Text(
-                  server.name,
-                  maxLines: 1,
-                  overflow:
-                      TextOverflow
-                          .ellipsis,
-                ),
-                subtitle:
-                    Text(
-                  '${server.type} • '
-                  '${server.host}:'
-                  '${server.port}',
-                ),
-                trailing:
-                    Text(
-                  server.ping ==
-                          null
-                      ? '---'
-                      : '${server.ping} ms',
-                ),
-              ),
+            final selected =
+                selectedServer?.raw ==
+                    server.raw;
+
+            return _serverTile(
+              server,
+              entry.key,
+              selected,
             );
           },
         ),
@@ -2369,8 +2914,265 @@ class _HomePageState extends State<HomePage> {
     );
   }
 
+  Widget _serverTile(
+    Server server,
+    int index,
+    bool selected,
+  ) {
+    return Container(
+      margin:
+          const EdgeInsets.only(
+        bottom: 10,
+      ),
+      decoration:
+          BoxDecoration(
+        color:
+            selected
+                ? const Color(
+                    0xFF17152B,
+                  )
+                : const Color(
+                    0xFF0D121D,
+                  ),
+        borderRadius:
+            BorderRadius.circular(22),
+        border:
+            Border.all(
+          color:
+              selected
+                  ? const Color(
+                      0xFF7C4DFF,
+                    ).withValues(
+                      alpha: .65,
+                    )
+                  : Colors.white
+                      .withValues(
+                      alpha: .05,
+                    ),
+        ),
+      ),
+      child: Material(
+        color:
+            Colors.transparent,
+        child: InkWell(
+          onTap: () =>
+              selectManualServer(
+            server,
+          ),
+          borderRadius:
+              BorderRadius.circular(22),
+          child: Padding(
+            padding:
+                const EdgeInsets.all(14),
+            child: Row(
+              children: [
+                Container(
+                  width: 48,
+                  height: 48,
+                  decoration:
+                      BoxDecoration(
+                    shape:
+                        BoxShape.circle,
+                    gradient:
+                        selected
+                            ? mainGradient
+                            : const LinearGradient(
+                                colors: [
+                                  Color(
+                                    0xFF1A2232,
+                                  ),
+                                  Color(
+                                    0xFF101621,
+                                  ),
+                                ],
+                              ),
+                  ),
+                  child: Center(
+                    child: selected
+                        ? const Icon(
+                            Icons.check,
+                            color:
+                                Colors.white,
+                          )
+                        : Text(
+                            '${index + 1}',
+                            style:
+                                const TextStyle(
+                              fontWeight:
+                                  FontWeight
+                                      .bold,
+                            ),
+                          ),
+                  ),
+                ),
+
+                const SizedBox(
+                  width: 12,
+                ),
+
+                Expanded(
+                  child:
+                      Column(
+                    crossAxisAlignment:
+                        CrossAxisAlignment
+                            .start,
+                    children: [
+                      Text(
+                        server.name,
+                        maxLines: 1,
+                        overflow:
+                            TextOverflow
+                                .ellipsis,
+                        style:
+                            const TextStyle(
+                          fontWeight:
+                              FontWeight
+                                  .bold,
+                          fontSize: 14,
+                        ),
+                      ),
+                      const SizedBox(
+                        height: 5,
+                      ),
+                      Row(
+                        children: [
+                          Container(
+                            padding:
+                                const EdgeInsets
+                                    .symmetric(
+                              horizontal:
+                                  7,
+                              vertical:
+                                  3,
+                            ),
+                            decoration:
+                                BoxDecoration(
+                              color:
+                                  Colors.white
+                                      .withValues(
+                                alpha:
+                                    .06,
+                              ),
+                              borderRadius:
+                                  BorderRadius
+                                      .circular(
+                                7,
+                              ),
+                            ),
+                            child:
+                                Text(
+                              server.type,
+                              style:
+                                  const TextStyle(
+                                fontSize:
+                                    9,
+                                color:
+                                    Colors.white60,
+                              ),
+                            ),
+                          ),
+                          const SizedBox(
+                            width: 7,
+                          ),
+                          Expanded(
+                            child:
+                                Text(
+                              '${server.host}:${server.port}',
+                              maxLines:
+                                  1,
+                              overflow:
+                                  TextOverflow
+                                      .ellipsis,
+                              style:
+                                  const TextStyle(
+                                color:
+                                    Colors.white38,
+                                fontSize:
+                                    10,
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ],
+                  ),
+                ),
+
+                const SizedBox(
+                  width: 8,
+                ),
+
+                _pingWidget(
+                  server.ping,
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _pingWidget(int? ping) {
+    if (testing) {
+      return const SizedBox(
+        width: 22,
+        height: 22,
+        child:
+            CircularProgressIndicator(
+          strokeWidth: 2,
+        ),
+      );
+    }
+
+    if (ping == null) {
+      return const Column(
+        children: [
+          Icon(
+            Icons.close,
+            color:
+                Colors.redAccent,
+            size: 18,
+          ),
+          Text(
+            'Fail',
+            style:
+                TextStyle(
+              color:
+                  Colors.white38,
+              fontSize: 9,
+            ),
+          ),
+        ],
+      );
+    }
+
+    return Column(
+      children: [
+        Text(
+          '$ping',
+          style:
+              const TextStyle(
+            fontSize: 15,
+            fontWeight:
+                FontWeight.bold,
+          ),
+        ),
+        const Text(
+          'ms',
+          style:
+              TextStyle(
+            color:
+                Colors.white38,
+            fontSize: 9,
+          ),
+        ),
+      ],
+    );
+  }
+
   // ============================================================
-  // TRAFFIC
+  // TRAFFIC PAGE
   // ============================================================
 
   Widget _traffic() {
@@ -2380,14 +3182,16 @@ class _HomePageState extends State<HomePage> {
             : max(
                 0,
                 totalBytes! -
-                    (usedBytes ??
-                        0),
+                    (usedBytes ?? 0),
               );
 
     return ListView(
       padding:
-          const EdgeInsets.all(
+          const EdgeInsets.fromLTRB(
         18,
+        18,
+        18,
+        24,
       ),
       children: [
         header(
@@ -2395,154 +3199,176 @@ class _HomePageState extends State<HomePage> {
           'آمار زنده VPN',
         ),
 
-        card(
-          ListTile(
-            title:
-                const Text(
-              'سرعت دانلود',
-            ),
-            subtitle:
-                Text(
-              download,
-              style:
-                  const TextStyle(
-                fontSize: 20,
-                fontWeight:
-                    FontWeight.bold,
+        Row(
+          children: [
+            Expanded(
+              child:
+                  _bigTrafficCard(
+                Icons.download_rounded,
+                'دانلود',
+                download,
+                const Color(
+                  0xFF00E5FF,
+                ),
               ),
             ),
-            leading:
-                const Icon(
-              Icons.download,
+            const SizedBox(
+              width: 10,
+            ),
+            Expanded(
+              child:
+                  _bigTrafficCard(
+                Icons.upload_rounded,
+                'آپلود',
+                upload,
+                const Color(
+                  0xFF9C6CFF,
+                ),
+              ),
+            ),
+          ],
+        ),
+
+        card(
+          _trafficRow(
+            Icons.download_done,
+            'دانلود این جلسه',
+            size(
+              downloadTotalBytes,
+            ),
+          ),
+        ),
+
+        card(
+          _trafficRow(
+            Icons.upload,
+            'آپلود این جلسه',
+            size(
+              uploadTotalBytes,
+            ),
+          ),
+        ),
+
+        card(
+          _trafficRow(
+            Icons.data_usage,
+            'حجم مصرف‌شده اشتراک',
+            size(usedBytes),
+          ),
+        ),
+
+        card(
+          _trafficRow(
+            Icons.storage,
+            'حجم باقی‌مانده',
+            size(remaining),
+          ),
+        ),
+
+        card(
+          _trafficRow(
+            Icons.event,
+            'تاریخ انقضا',
+            expireAt == null
+                ? 'نامشخص'
+                : _dateFromUnix(
+                    expireAt!,
+                  ),
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _bigTrafficCard(
+    IconData icon,
+    String title,
+    String value,
+    Color color,
+  ) {
+    return card(
+      Column(
+        crossAxisAlignment:
+            CrossAxisAlignment.start,
+        children: [
+          Icon(
+            icon,
+            color: color,
+            size: 25,
+          ),
+          const SizedBox(
+            height: 12,
+          ),
+          Text(
+            title,
+            style:
+                const TextStyle(
               color:
-                  Color(
-                0xFF00E5FF,
-              ),
+                  Colors.white54,
+              fontSize: 11,
             ),
           ),
-        ),
+          const SizedBox(
+            height: 5,
+          ),
+          Text(
+            value,
+            style:
+                const TextStyle(
+              fontSize: 18,
+              fontWeight:
+                  FontWeight.w900,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
 
-        card(
-          ListTile(
-            title:
-                const Text(
-              'سرعت آپلود',
+  Widget _trafficRow(
+    IconData icon,
+    String title,
+    String value,
+  ) {
+    return Row(
+      children: [
+        Container(
+          width: 42,
+          height: 42,
+          decoration:
+              BoxDecoration(
+            borderRadius:
+                BorderRadius.circular(
+              13,
             ),
-            subtitle:
-                Text(
-              upload,
-              style:
-                  const TextStyle(
-                fontSize: 20,
-                fontWeight:
-                    FontWeight.bold,
-              ),
+            color:
+                Colors.white
+                    .withValues(
+              alpha: .05,
             ),
-            leading:
-                const Icon(
-              Icons.upload,
+          ),
+          child:
+              Icon(icon),
+        ),
+        const SizedBox(
+          width: 12,
+        ),
+        Expanded(
+          child: Text(
+            title,
+            style:
+                const TextStyle(
               color:
-                  Color(
-                0xFF7C4DFF,
-              ),
+                  Colors.white70,
             ),
           ),
         ),
-
-        card(
-          ListTile(
-            title:
-                const Text(
-              'دانلود این جلسه',
-            ),
-            subtitle:
-                Text(
-              size(
-                downloadTotalBytes,
-              ),
-            ),
-            leading:
-                const Icon(
-              Icons.download_done,
-            ),
-          ),
-        ),
-
-        card(
-          ListTile(
-            title:
-                const Text(
-              'آپلود این جلسه',
-            ),
-            subtitle:
-                Text(
-              size(
-                uploadTotalBytes,
-              ),
-            ),
-            leading:
-                const Icon(
-              Icons.upload,
-            ),
-          ),
-        ),
-
-        card(
-          ListTile(
-            title:
-                const Text(
-              'حجم مصرف‌شده اشتراک',
-            ),
-            subtitle:
-                Text(
-              size(
-                usedBytes,
-              ),
-            ),
-            leading:
-                const Icon(
-              Icons.data_usage,
-            ),
-          ),
-        ),
-
-        card(
-          ListTile(
-            title:
-                const Text(
-              'حجم باقی‌مانده',
-            ),
-            subtitle:
-                Text(
-              size(
-                remaining,
-              ),
-            ),
-            leading:
-                const Icon(
-              Icons.storage,
-            ),
-          ),
-        ),
-
-        card(
-          ListTile(
-            title:
-                const Text(
-              'تاریخ انقضا',
-            ),
-            subtitle:
-                Text(
-              expireAt == null
-                  ? 'نامشخص'
-                  : _dateFromUnix(
-                      expireAt!,
-                    ),
-            ),
-            leading:
-                const Icon(
-              Icons.event,
-            ),
+        Text(
+          value,
+          style:
+              const TextStyle(
+            fontWeight:
+                FontWeight.bold,
           ),
         ),
       ],
@@ -2556,8 +3382,11 @@ class _HomePageState extends State<HomePage> {
   Widget _subscription() {
     return ListView(
       padding:
-          const EdgeInsets.all(
+          const EdgeInsets.fromLTRB(
         18,
+        18,
+        18,
+        24,
       ),
       children: [
         header(
@@ -2565,42 +3394,178 @@ class _HomePageState extends State<HomePage> {
           'مدیریت اشتراک',
         ),
 
-        TextField(
-          controller: url,
-          textDirection:
-              TextDirection.ltr,
-          decoration:
-              const InputDecoration(
-            labelText:
-                'Subscription URL',
-            prefixIcon:
-                Icon(
-              Icons.link,
-            ),
-            border:
-                OutlineInputBorder(),
+        card(
+          Column(
+            crossAxisAlignment:
+                CrossAxisAlignment
+                    .start,
+            children: [
+              const Row(
+                children: [
+                  Icon(
+                    Icons.link,
+                    color:
+                        Color(0xFF00E5FF),
+                  ),
+                  SizedBox(
+                    width: 10,
+                  ),
+                  Text(
+                    'اشتراک فعلی',
+                    style:
+                        TextStyle(
+                      fontWeight:
+                          FontWeight.bold,
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(
+                height: 14,
+              ),
+              Container(
+                width:
+                    double.infinity,
+                padding:
+                    const EdgeInsets.all(
+                  13,
+                ),
+                decoration:
+                    BoxDecoration(
+                  color:
+                      Colors.black
+                          .withValues(
+                    alpha: .25,
+                  ),
+                  borderRadius:
+                      BorderRadius.circular(
+                    14,
+                  ),
+                ),
+                child: Text(
+                  url.text.isEmpty
+                      ? 'هیچ Subscription اضافه نشده'
+                      : url.text,
+                  maxLines: 3,
+                  overflow:
+                      TextOverflow
+                          .ellipsis,
+                  textDirection:
+                      TextDirection.ltr,
+                  style:
+                      const TextStyle(
+                    color:
+                        Colors.white70,
+                    fontSize: 12,
+                  ),
+                ),
+              ),
+            ],
           ),
         ),
 
         const SizedBox(
-          height: 12,
+          height: 4,
         ),
 
-        FilledButton.icon(
-          onPressed:
-              loading
-                  ? null
-                  : () =>
-                      loadSubscription(),
-          icon:
-              const Icon(
-            Icons.refresh,
+        // ADD SUBSCRIPTION
+        SizedBox(
+          width: double.infinity,
+          height: 56,
+          child: FilledButton.icon(
+            onPressed:
+                loading
+                    ? null
+                    : addSubscription,
+            icon:
+                const Icon(
+              Icons.add_link,
+            ),
+            label:
+                const Text(
+              'افزودن Subscription',
+              style:
+                  TextStyle(
+                fontWeight:
+                    FontWeight.bold,
+              ),
+            ),
+            style:
+                FilledButton.styleFrom(
+              backgroundColor:
+                  const Color(
+                0xFF3158FF,
+              ),
+              shape:
+                  RoundedRectangleBorder(
+                borderRadius:
+                    BorderRadius.circular(
+                  18,
+                ),
+              ),
+            ),
           ),
-          label:
-              Text(
-            loading
-                ? 'در حال دریافت...'
-                : 'دریافت / بروزرسانی',
+        ),
+
+        const SizedBox(
+          height: 10,
+        ),
+
+        // UPDATE SUBSCRIPTION
+        SizedBox(
+          width: double.infinity,
+          height: 56,
+          child: OutlinedButton.icon(
+            onPressed:
+                loading ||
+                        url.text.isEmpty
+                    ? null
+                    : () =>
+                        loadSubscription(),
+            icon:
+                loading
+                    ? const SizedBox(
+                        width: 19,
+                        height: 19,
+                        child:
+                            CircularProgressIndicator(
+                          strokeWidth:
+                              2,
+                        ),
+                      )
+                    : const Icon(
+                        Icons.refresh_rounded,
+                      ),
+            label:
+                Text(
+              loading
+                  ? 'در حال بروزرسانی...'
+                  : 'بروزرسانی Subscription',
+              style:
+                  const TextStyle(
+                fontWeight:
+                    FontWeight.bold,
+              ),
+            ),
+            style:
+                OutlinedButton.styleFrom(
+              side:
+                  BorderSide(
+                color:
+                    const Color(
+                  0xFF7C4DFF,
+                ).withValues(
+                  alpha: .7,
+                ),
+              ),
+              shape:
+                  RoundedRectangleBorder(
+                borderRadius:
+                    BorderRadius.circular(
+                  18,
+                ),
+              ),
+            ),
           ),
         ),
 
@@ -2609,36 +3574,102 @@ class _HomePageState extends State<HomePage> {
         ),
 
         card(
-          const ListTile(
-            leading:
-                Icon(
-              Icons.sync,
-            ),
-            title:
-                Text(
-              'بروزرسانی خودکار',
-            ),
-            subtitle:
-                Text(
-              'هر ۱۵ دقیقه',
+          Column(
+            children: [
+              _infoLine(
+                Icons.dns,
+                'تعداد سرورها',
+                '${servers.length}',
+              ),
+              const Divider(
+                height: 22,
+              ),
+              _infoLine(
+                Icons.update,
+                'آخرین بروزرسانی',
+                lastUpdate == null
+                    ? 'هنوز انجام نشده'
+                    : _formatUpdate(
+                        lastUpdate!,
+                      ),
+              ),
+              const Divider(
+                height: 22,
+              ),
+              _infoLine(
+                Icons.data_usage,
+                'حجم کل',
+                size(totalBytes),
+              ),
+              const Divider(
+                height: 22,
+              ),
+              _infoLine(
+                Icons.event,
+                'انقضا',
+                expireAt == null
+                    ? 'نامشخص'
+                    : _dateFromUnix(
+                        expireAt!,
+                      ),
+              ),
+            ],
+          ),
+        ),
+      ],
+    );
+  }
+
+  String _formatUpdate(String value) {
+    try {
+      final date =
+          DateTime.parse(value)
+              .toLocal();
+
+      return
+          '${date.year}/'
+          '${date.month.toString().padLeft(2, '0')}/'
+          '${date.day.toString().padLeft(2, '0')} '
+          '${date.hour.toString().padLeft(2, '0')}:'
+          '${date.minute.toString().padLeft(2, '0')}';
+    } catch (_) {
+      return value;
+    }
+  }
+
+  Widget _infoLine(
+    IconData icon,
+    String title,
+    String value,
+  ) {
+    return Row(
+      children: [
+        Icon(
+          icon,
+          color:
+              const Color(
+            0xFF9C6CFF,
+          ),
+        ),
+        const SizedBox(
+          width: 12,
+        ),
+        Expanded(
+          child: Text(
+            title,
+            style:
+                const TextStyle(
+              color:
+                  Colors.white60,
             ),
           ),
         ),
-
-        card(
-          ListTile(
-            leading:
-                const Icon(
-              Icons.dns,
-            ),
-            title:
-                const Text(
-              'سرورها',
-            ),
-            subtitle:
-                Text(
-              '${servers.length} سرور',
-            ),
+        Text(
+          value,
+          style:
+              const TextStyle(
+            fontWeight:
+                FontWeight.bold,
           ),
         ),
       ],
@@ -2652,8 +3683,11 @@ class _HomePageState extends State<HomePage> {
   Widget _settings() {
     return ListView(
       padding:
-          const EdgeInsets.all(
+          const EdgeInsets.fromLTRB(
         18,
+        18,
+        18,
+        24,
       ),
       children: [
         header(
@@ -2662,27 +3696,93 @@ class _HomePageState extends State<HomePage> {
         ),
 
         card(
-          const ListTile(
-            leading:
-                Icon(
-              Icons.flash_on,
-            ),
-            title:
-                Text(
-              'انتخاب سریع‌ترین سرور',
-            ),
-            subtitle:
-                Text(
-              'بر اساس TCP Connect',
-            ),
+          Column(
+            crossAxisAlignment:
+                CrossAxisAlignment
+                    .start,
+            children: [
+              const Text(
+                'روش انتخاب سرور',
+                style:
+                    TextStyle(
+                  fontWeight:
+                      FontWeight.bold,
+                  fontSize: 16,
+                ),
+              ),
+              const SizedBox(
+                height: 14,
+              ),
+              RadioListTile<
+                  ServerSelectionMode>(
+                value:
+                    ServerSelectionMode
+                        .auto,
+                groupValue:
+                    selectionMode,
+                onChanged:
+                    (_) =>
+                        selectAutoMode(),
+                title:
+                    const Text(
+                  'انتخاب خودکار',
+                ),
+                subtitle:
+                    const Text(
+                  'اتصال به سریع‌ترین سرور',
+                ),
+                secondary:
+                    const Icon(
+                  Icons.auto_awesome,
+                ),
+              ),
+              RadioListTile<
+                  ServerSelectionMode>(
+                value:
+                    ServerSelectionMode
+                        .manual,
+                groupValue:
+                    selectionMode,
+                onChanged:
+                    (_) {
+                  setState(() {
+                    selectionMode =
+                        ServerSelectionMode
+                            .manual;
+                  });
+
+                  saveSelectionMode();
+
+                  setState(() {
+                    page = 1;
+                  });
+                },
+                title:
+                    const Text(
+                  'انتخاب دستی',
+                ),
+                subtitle:
+                    const Text(
+                  'انتخاب مستقیم سرور توسط کاربر',
+                ),
+                secondary:
+                    const Icon(
+                  Icons.touch_app,
+                ),
+              ),
+            ],
           ),
         ),
 
         card(
           const ListTile(
+            contentPadding:
+                EdgeInsets.zero,
             leading:
                 Icon(
               Icons.shield,
+              color:
+                  Color(0xFF00E5FF),
             ),
             title:
                 Text(
@@ -2697,9 +3797,13 @@ class _HomePageState extends State<HomePage> {
 
         card(
           ListTile(
+            contentPadding:
+                EdgeInsets.zero,
             leading:
                 const Icon(
               Icons.route,
+              color:
+                  Color(0xFF9C6CFF),
             ),
             title:
                 const Text(
@@ -2716,9 +3820,13 @@ class _HomePageState extends State<HomePage> {
 
         card(
           const ListTile(
+            contentPadding:
+                EdgeInsets.zero,
             leading:
                 Icon(
               Icons.dns,
+              color:
+                  Color(0xFF00E5FF),
             ),
             title:
                 Text(
@@ -2733,19 +3841,23 @@ class _HomePageState extends State<HomePage> {
 
         card(
           ListTile(
+            contentPadding:
+                EdgeInsets.zero,
             leading:
                 Icon(
-              connected
-                  ? Icons.check_circle
-                  : Icons.info_outline,
-              color:
                   connected
-                      ? Colors.green
-                      : Colors.white54,
-            ),
+                      ? Icons.check_circle
+                      : Icons.info_outline,
+                  color:
+                      connected
+                          ? const Color(
+                              0xFF00E676,
+                            )
+                          : Colors.white54,
+                ),
             title:
                 const Text(
-              'وضعیت',
+              'وضعیت VPN',
             ),
             subtitle:
                 Text(
