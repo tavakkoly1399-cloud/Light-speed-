@@ -60,19 +60,6 @@ class Server {
   final Map<String, dynamic> outbound;
 
   int? ping;
-  bool usable = true;
-}
-
-class SubscriptionInfo {
-  const SubscriptionInfo({
-    this.total,
-    this.used,
-    this.expire,
-  });
-
-  final int? total;
-  final int? used;
-  final int? expire;
 }
 
 class HomePage extends StatefulWidget {
@@ -83,30 +70,26 @@ class HomePage extends StatefulWidget {
 }
 
 class _HomePageState extends State<HomePage> {
-  final TextEditingController urlController =
-      TextEditingController();
+  final url = TextEditingController();
+  final servers = <Server>[];
 
-  final List<Server> servers = [];
-
-  StreamSubscription? stateSubscription;
-  StreamSubscription? trafficSubscription;
-  StreamSubscription? faultSubscription;
+  StreamSubscription? stateSub;
+  StreamSubscription? trafficSub;
 
   Timer? refreshTimer;
   Timer? durationTimer;
 
-  bool connected = false;
-  bool connecting = false;
+  int page = 0;
+
   bool loading = false;
   bool testing = false;
-  bool internetTestRunning = false;
+  bool connected = false;
+  bool connecting = false;
 
   String stateText = 'آماده اتصال';
+  String download = '0 Mbps';
+  String upload = '0 Mbps';
   String lastFault = '';
-  String internetStatus = 'تست نشده';
-
-  double downloadBps = 0;
-  double uploadBps = 0;
 
   int downloadTotalBytes = 0;
   int uploadTotalBytes = 0;
@@ -118,240 +101,117 @@ class _HomePageState extends State<HomePage> {
   DateTime? connectedAt;
   Duration connectionDuration = Duration.zero;
 
-  final List<double> downloadHistory = [];
-  final List<double> uploadHistory = [];
-
   @override
   void initState() {
     super.initState();
 
-    _listenState();
-    _listenTraffic();
-    _listenFaults();
+    stateSub = vpn.serviceStateStream.listen((s) {
+      if (!mounted) return;
+
+      final text = s.toString();
+      final low = text.toLowerCase();
+
+      setState(() {
+        stateText = text;
+
+        if (low.contains('running') ||
+            low.contains('connected') ||
+            low.contains('started')) {
+          connected = true;
+        }
+
+        if (low.contains('stopped') ||
+            low.contains('disconnected')) {
+          connected = false;
+        }
+      });
+    });
+
+    trafficSub = vpn.trafficStatsStream.listen((s) {
+      if (!mounted) return;
+
+      try {
+        setState(() {
+          download = speed(s.downlinkBps);
+          upload = speed(s.uplinkBps);
+
+          downloadTotalBytes =
+              (s.downlinkTotalBytes as num).toInt();
+
+          uploadTotalBytes =
+              (s.uplinkTotalBytes as num).toInt();
+        });
+      } catch (_) {}
+    });
+
+    try {
+      vpn.faultStream.listen((e) {
+        if (!mounted) return;
+
+        setState(() {
+          lastFault = e.toString();
+        });
+      });
+    } catch (_) {}
 
     refreshTimer = Timer.periodic(
       const Duration(minutes: 15),
       (_) {
-        if (!connected && !loading) {
+        if (!connected) {
           loadSubscription(silent: true);
         }
       },
     );
 
-    loadSavedSubscription();
+    loadSaved();
   }
 
-  // ============================================================
-  // VPN STATE
-  // ============================================================
+  Future<void> loadSaved() async {
+    final p = await SharedPreferences.getInstance();
 
-  void _listenState() {
-    stateSubscription = vpn.serviceStateStream.listen((state) {
-      if (!mounted) return;
+    final saved = p.getString('subscription_url');
 
-      final value = state.toString().toLowerCase();
+    if (saved == null || saved.isEmpty) return;
 
-      if (value.contains('started')) {
-        setState(() {
-          connected = true;
-          connecting = false;
-          stateText = 'VPN متصل است';
-          connectedAt ??= DateTime.now();
-          internetStatus = '🟡 در انتظار ترافیک...';
-        });
+    url.text = saved;
 
-        _startDuration();
-
-        Future.delayed(
-          const Duration(seconds: 3),
-          () {
-            if (mounted && connected) {
-              testInternet();
-            }
-          },
-        );
-      } else if (value.contains('stopped')) {
-        setState(() {
-          connected = false;
-          connecting = false;
-          stateText = 'قطع شد';
-          internetStatus = 'VPN قطع است';
-          connectedAt = null;
-          connectionDuration = Duration.zero;
-        });
-
-        durationTimer?.cancel();
-      } else if (value.contains('starting')) {
-        setState(() {
-          connecting = true;
-          stateText = 'در حال اتصال...';
-        });
-      } else if (value.contains('stopping')) {
-        setState(() {
-          stateText = 'در حال قطع اتصال...';
-        });
-      }
-    });
-  }
-
-  // ============================================================
-  // REAL TRAFFIC
-  // ============================================================
-
-  void _listenTraffic() {
-    trafficSubscription =
-        vpn.trafficStatsStream.listen((stats) {
-      if (!mounted) return;
-
-      final down = max(
-        0,
-        stats.downlinkBps,
-      ).toDouble();
-
-      final up = max(
-        0,
-        stats.uplinkBps,
-      ).toDouble();
-
-      final downTotal = max(
-        0,
-        stats.downlinkTotalBytes,
-      );
-
-      final upTotal = max(
-        0,
-        stats.uplinkTotalBytes,
-      );
-
-      setState(() {
-        downloadBps = down;
-        uploadBps = up;
-
-        downloadTotalBytes = downTotal;
-        uploadTotalBytes = upTotal;
-
-        _addHistory(
-          downloadHistory,
-          down,
-        );
-
-        _addHistory(
-          uploadHistory,
-          up,
-        );
-
-        /*
-         * این مهم‌ترین تشخیص ماست:
-         *
-         * اگر sing-box واقعاً داده عبور دهد،
-         * TrafficStats افزایش پیدا می‌کند.
-         */
-        if (connected &&
-            (downTotal > 0 || upTotal > 0)) {
-          internetStatus =
-              '🟢 اینترنت در حال عبور است';
-        }
-      });
-    });
-  }
-
-  void _listenFaults() {
-    faultSubscription =
-        vpn.faultStream.listen((fault) {
-      if (!mounted) return;
-
-      final text = fault.toString();
-
-      if (text.trim().isEmpty) return;
-
-      setState(() {
-        lastFault = text;
-        stateText = 'خطای sing-box';
-      });
-    });
-  }
-
-  void _addHistory(
-    List<double> list,
-    double value,
-  ) {
-    list.add(value);
-
-    if (list.length > 40) {
-      list.removeAt(0);
-    }
-  }
-
-  // ============================================================
-  // SUBSCRIPTION
-  // ============================================================
-
-  Future<void> loadSavedSubscription() async {
-    final prefs =
-        await SharedPreferences.getInstance();
-
-    final saved =
-        prefs.getString('subscription_url');
-
-    if (saved == null ||
-        saved.trim().isEmpty) {
-      return;
-    }
-
-    urlController.text = saved;
-
-    await loadSubscription(
-      silent: true,
-    );
+    await loadSubscription(silent: true);
   }
 
   Future<void> loadSubscription({
     bool silent = false,
   }) async {
-    final url =
-        urlController.text.trim();
+    final text = url.text.trim();
 
-    if (url.isEmpty) {
-      if (!silent) {
-        _showMessage(
-          'آدرس Subscription وارد نشده است',
-        );
+    if (text.isEmpty) {
+      if (!silent && mounted) {
+        setState(() {
+          stateText = 'Subscription URL را وارد کن';
+        });
       }
       return;
     }
 
-    if (connected) {
-      if (!silent) {
-        _showMessage(
-          'ابتدا VPN را قطع کن',
-        );
-      }
-      return;
+    if (!silent && mounted) {
+      setState(() {
+        stateText = 'در حال دریافت سرورها...';
+      });
     }
 
     if (mounted) {
       setState(() {
         loading = true;
-
-        if (!silent) {
-          stateText =
-              'در حال دریافت Subscription...';
-        }
       });
     }
 
     try {
-      final uri = Uri.parse(url);
-
       final response = await http.get(
-        uri,
+        Uri.parse(text),
         headers: const {
           'User-Agent': 'LightSpeed/2.0',
-          'Accept': '*/*',
-          'Cache-Control': 'no-cache',
         },
       ).timeout(
-        const Duration(seconds: 30),
+        const Duration(seconds: 20),
       );
 
       if (response.statusCode < 200 ||
@@ -366,22 +226,25 @@ class _HomePageState extends State<HomePage> {
         allowMalformed: true,
       );
 
-      final info =
-          _parseSubscriptionInfo(
-        response.headers[
-          'subscription-userinfo'
-        ],
+      _readUserInfo(
+        response.headers['subscription-userinfo'],
       );
 
-      final parsed =
-          _parseSubscriptionBody(body);
+      final result = <Server>[];
 
-      final prefs =
-          await SharedPreferences.getInstance();
+      for (final line in decodeSubscription(body)) {
+        final server = parseServer(line);
 
-      await prefs.setString(
+        if (server != null) {
+          result.add(server);
+        }
+      }
+
+      final p = await SharedPreferences.getInstance();
+
+      await p.setString(
         'subscription_url',
-        url,
+        text,
       );
 
       if (!mounted) return;
@@ -389,715 +252,199 @@ class _HomePageState extends State<HomePage> {
       setState(() {
         servers
           ..clear()
-          ..addAll(parsed);
-
-        totalBytes = info.total;
-        usedBytes = info.used;
-        expireAt = info.expire;
+          ..addAll(result);
 
         loading = false;
 
-        stateText = parsed.isEmpty
-            ? 'هیچ کانفیگ معتبری پیدا نشد'
-            : '${parsed.length} کانفیگ دریافت شد';
-
-        lastFault = '';
+        stateText =
+            '${servers.length} سرور دریافت شد';
       });
 
-      if (parsed.isNotEmpty) {
-        await testAllServers();
-      }
+      await testAll(silent: true);
     } catch (e) {
       if (!mounted) return;
 
       setState(() {
         loading = false;
-        stateText =
-            'خطا در دریافت Subscription';
-        lastFault = e.toString();
+        stateText = 'خطا در دریافت Subscription';
       });
 
       if (!silent) {
-        _showMessage(
-          'دریافت Subscription ناموفق بود',
+        snack(
+          'دریافت Subscription ناموفق بود: $e',
         );
       }
     }
   }
 
-  SubscriptionInfo _parseSubscriptionInfo(
-    String? header,
-  ) {
-    if (header == null ||
-        header.trim().isEmpty) {
-      return const SubscriptionInfo();
-    }
+  void _readUserInfo(String? raw) {
+    if (raw == null) return;
 
-    final map = <String, int>{};
+    final values = <String, int>{};
 
-    for (final item in header.split(';')) {
-      final parts =
-          item.trim().split('=');
+    for (final item in raw.split(';')) {
+      final parts = item.trim().split('=');
 
-      if (parts.length != 2) continue;
-
-      final value =
-          int.tryParse(parts[1].trim());
-
-      if (value != null) {
-        map[parts[0].trim()] = value;
+      if (parts.length == 2) {
+        values[parts[0]] =
+            int.tryParse(parts[1]) ?? 0;
       }
     }
 
-    final upload =
-        map['upload'] ?? 0;
+    if (!mounted || values.isEmpty) return;
 
-    final download =
-        map['download'] ?? 0;
+    setState(() {
+      totalBytes = values['total'];
 
-    return SubscriptionInfo(
-      total: map['total'],
-      used: upload + download,
-      expire: map['expire'],
-    );
+      usedBytes =
+          (values['upload'] ?? 0) +
+          (values['download'] ?? 0);
+
+      expireAt = values['expire'];
+    });
   }
 
-  // ============================================================
-  // UNIVERSAL SUBSCRIPTION PARSER
-  // ============================================================
-
-  List<Server> _parseSubscriptionBody(
-    String body,
-  ) {
-    var text = body.trim();
-
-    if (text.isEmpty) {
-      return [];
+  List<String> decodeSubscription(String body) {
+    List<String> extractLinks(String text) {
+      return text
+          .split(RegExp(r'\r?\n'))
+          .map((x) => x.trim())
+          .where(
+            (x) => RegExp(
+              r'^[a-zA-Z][a-zA-Z0-9+.-]*://',
+            ).hasMatch(x),
+          )
+          .toList();
     }
 
-    // ----------------------------------------------------------
-    // 1. JSON
-    // ----------------------------------------------------------
-
-    final jsonServers =
-        _parseJsonAnything(text);
-
-    if (jsonServers.isNotEmpty) {
-      return jsonServers;
-    }
-
-    // ----------------------------------------------------------
-    // 2. URI
-    // ----------------------------------------------------------
-
-    final direct =
-        _extractUriLines(text);
+    var direct = extractLinks(body);
 
     if (direct.isNotEmpty) {
-      return _parseUriList(direct);
+      return direct;
     }
 
-    // ----------------------------------------------------------
-    // 3. Base64
-    // ----------------------------------------------------------
-
-    final decoded =
-        _decodeBase64(text);
-
-    if (decoded != null) {
-      final decodedJson =
-          _parseJsonAnything(decoded);
-
-      if (decodedJson.isNotEmpty) {
-        return decodedJson;
-      }
-
-      final lines =
-          _extractUriLines(decoded);
-
-      if (lines.isNotEmpty) {
-        return _parseUriList(lines);
-      }
-    }
-
-    // ----------------------------------------------------------
-    // 4. Base64 چندلایه
-    // ----------------------------------------------------------
-
-    if (text.length > 20) {
-      final second =
-          _decodeBase64(
-        _removeWhitespace(text),
-      );
-
-      if (second != null &&
-          second != text) {
-        final lines =
-            _extractUriLines(second);
-
-        if (lines.isNotEmpty) {
-          return _parseUriList(lines);
-        }
-      }
-    }
-
-    return [];
-  }
-
-  String _removeWhitespace(
-    String text,
-  ) {
-    return text.replaceAll(
-      RegExp(r'\s+'),
-      '',
-    );
-  }
-
-  List<Server> _parseJsonAnything(
-    String text,
-  ) {
-    try {
-      final decoded = jsonDecode(text);
-
-      if (decoded is Map<String, dynamic>) {
-        return _parseJsonRoot(decoded);
-      }
-
-      if (decoded is List) {
-        return _parseJsonOutboundList(decoded);
-      }
-    } catch (_) {}
-
-    return [];
-  }
-
-  List<Server> _parseJsonRoot(
-    Map<String, dynamic> root,
-  ) {
-    final result = <Server>[];
-
-    final outbounds =
-        root['outbounds'];
-
-    if (outbounds is List) {
-      result.addAll(
-        _parseJsonOutboundList(
-          outbounds,
-        ),
-      );
-    }
-
-    final proxies =
-        root['proxies'];
-
-    if (proxies is List) {
-      result.addAll(
-        _parseClashLikeProxies(
-          proxies,
-        ),
-      );
-    }
-
-    return _uniqueServers(result);
-  }
-
-  List<Server> _parseJsonOutboundList(
-    List list,
-  ) {
-    final result = <Server>[];
-
-    for (int i = 0;
-        i < list.length;
-        i++) {
-      final item = list[i];
-
-      if (item is! Map) {
-        continue;
-      }
-
-      final outbound =
-          Map<String, dynamic>.from(item);
-
-      final type =
-          '${outbound['type'] ?? ''}'
-              .toLowerCase();
-
-      if (!_supportedOutboundType(type)) {
-        continue;
-      }
-
-      if (_isGroupOutbound(type)) {
-        continue;
-      }
-
-      var host =
-          '${outbound['server'] ?? ''}';
-
-      var port =
-          int.tryParse(
-            '${outbound['server_port'] ?? 0}',
-          ) ??
-          0;
-
-      /*
-       * برای outboundهایی که endpoint دارند.
-       */
-      if (host.isEmpty) {
-        final endpoint =
-            '${outbound['endpoint'] ?? ''}';
-
-        if (endpoint.isNotEmpty) {
-          final parsed =
-              _splitHostPort(endpoint);
-
-          host = parsed.$1;
-          port = parsed.$2;
-        }
-      }
-
-      if (host.isEmpty) {
-        continue;
-      }
-
-      final tag =
-          '${outbound['tag'] ?? '$type-$i'}';
-
-      result.add(
-        Server(
-          raw: jsonEncode(outbound),
-          name: tag,
-          type: type.toUpperCase(),
-          host: host,
-          port: port,
-          outbound: outbound,
-        ),
-      );
-    }
-
-    return _uniqueServers(result);
-  }
-
-  List<Server> _parseClashLikeProxies(
-    List list,
-  ) {
-    final result = <Server>[];
-
-    for (final item in list) {
-      if (item is! Map) continue;
-
-      final p =
-          Map<String, dynamic>.from(item);
-
-      final type =
-          '${p['type'] ?? ''}'.toLowerCase();
-
-      final name =
-          '${p['name'] ?? p['server'] ?? type}';
-
-      final host =
-          '${p['server'] ?? ''}';
-
-      final port =
-          int.tryParse(
-            '${p['port'] ?? 0}',
-          ) ??
-          0;
-
-      if (host.isEmpty ||
-          port <= 0) {
-        continue;
-      }
-
-      Map<String, dynamic>? outbound;
-
-      switch (type) {
-        case 'vless':
-          outbound =
-              _clashVless(p);
-          break;
-
-        case 'vmess':
-          outbound =
-              _clashVmess(p);
-          break;
-
-        case 'trojan':
-          outbound =
-              _clashTrojan(p);
-          break;
-
-        case 'ss':
-        case 'shadowsocks':
-          outbound =
-              _clashShadowsocks(p);
-          break;
-
-        case 'hysteria2':
-        case 'hy2':
-          outbound =
-              _clashHysteria2(p);
-          break;
-
-        case 'tuic':
-          outbound =
-              _clashTuic(p);
-          break;
-      }
-
-      if (outbound == null) {
-        continue;
-      }
-
-      result.add(
-        Server(
-          raw: jsonEncode(p),
-          name: name,
-          type: type.toUpperCase(),
-          host: host,
-          port: port,
-          outbound: outbound,
-        ),
-      );
-    }
-
-    return result;
-  }
-
-  bool _isGroupOutbound(
-    String type,
-  ) {
-    return {
-      'selector',
-      'urltest',
-      'fallback',
-      'loadbalance',
-      'random',
-      'block',
-      'dns',
-      'direct',
-    }.contains(type);
-  }
-
-  bool _supportedOutboundType(
-    String type,
-  ) {
-    const supported = {
-      'vless',
-      'vmess',
-      'trojan',
-      'shadowsocks',
-      'hysteria',
-      'hysteria2',
-      'tuic',
-      'anytls',
-      'shadowtls',
-      'http',
-      'socks',
-      'ssh',
-      'naive',
-      'wireguard',
-    };
-
-    return supported.contains(
-      type.toLowerCase(),
-    );
-  }
-
-  List<Server> _uniqueServers(
-    List<Server> input,
-  ) {
-    final result = <Server>[];
-    final seen = <String>{};
-
-    for (final server in input) {
-      final key =
-          '${server.type}|${server.host}|${server.port}|${server.raw}';
-
-      if (seen.add(key)) {
-        result.add(server);
-      }
-    }
-
-    return result;
-  }
-
-  List<String> _extractUriLines(
-    String text,
-  ) {
-    final result = <String>[];
-
-    for (final line
-        in text.split(RegExp(r'\r?\n'))) {
-      final value = line.trim();
-
-      if (value.isEmpty) continue;
-
-      if (value.startsWith('#') ||
-          value.startsWith('//')) {
-        continue;
-      }
-
-      if (value.startsWith(
-        '-----BEGIN',
-      )) {
-        continue;
-      }
-
-      final match = RegExp(
-        r'((?:vless|vmess|trojan|ss|shadowsocks|hysteria2|hy2|hysteria|tuic|anytls|shadowtls|http|socks5|socks)://\S+)',
-        caseSensitive: false,
-      ).firstMatch(value);
-
-      if (match != null) {
-        result.add(
-          match.group(1)!,
-        );
-      }
-    }
-
-    return result;
-  }
-
-  String? _decodeBase64(
-    String value,
-  ) {
-    try {
-      var encoded =
-          _removeWhitespace(value);
-
-      encoded = encoded
-          .replaceAll('-', '+')
-          .replaceAll('_', '/');
-
-      encoded += '=' *
-          ((4 - encoded.length % 4) % 4);
-
-      final bytes =
-          base64.decode(encoded);
-
-      final decoded =
-          utf8.decode(
-        bytes,
-        allowMalformed: true,
-      ).trim();
-
-      if (decoded.contains('://') ||
-          decoded.startsWith('{') ||
-          decoded.startsWith('[')) {
-        return decoded;
-      }
-    } catch (_) {}
-
-    return null;
-  }
-
-  List<Server> _parseUriList(
-    List<String> lines,
-  ) {
-    final result = <Server>[];
-
-    for (final raw in lines) {
+    var decoded = body
+        .trim()
+        .replaceAll(RegExp(r'\s+'), '')
+        .replaceAll('-', '+')
+        .replaceAll('_', '/');
+
+    for (int i = 0; i < 3; i++) {
       try {
-        final server =
-            _parseServer(raw);
+        decoded +=
+            '=' * ((4 - decoded.length % 4) % 4);
 
-        if (server != null) {
-          result.add(server);
+        final text = utf8.decode(
+          base64.decode(decoded),
+          allowMalformed: true,
+        );
+
+        direct = extractLinks(text);
+
+        if (direct.isNotEmpty) {
+          return direct;
         }
-      } catch (_) {}
+
+        decoded = text
+            .trim()
+            .replaceAll(RegExp(r'\s+'), '')
+            .replaceAll('-', '+')
+            .replaceAll('_', '/');
+      } catch (_) {
+        break;
+      }
     }
 
-    return _uniqueServers(result);
+    return [];
   }
 
-  // ============================================================
-  // URI PARSER
-  // ============================================================
-
-  Server? _parseServer(
-    String raw,
-  ) {
-    final uri =
-        Uri.tryParse(raw);
-
-    if (uri == null) {
-      return null;
-    }
-
-    switch (uri.scheme.toLowerCase()) {
-      case 'vless':
-        return _parseVless(
-          uri,
-          raw,
-        );
-
-      case 'vmess':
-        return _parseVmess(raw);
-
-      case 'trojan':
-        return _parseTrojan(
-          uri,
-          raw,
-        );
-
-      case 'ss':
-      case 'shadowsocks':
-        return _parseShadowsocks(
-          uri,
-          raw,
-        );
-
-      case 'hysteria2':
-      case 'hy2':
-        return _parseHysteria2(
-          uri,
-          raw,
-        );
-
-      case 'hysteria':
-        return _parseHysteria(
-          uri,
-          raw,
-        );
-
-      case 'tuic':
-        return _parseTuic(
-          uri,
-          raw,
-        );
-
-      case 'anytls':
-        return _parseAnyTLS(
-          uri,
-          raw,
-        );
-
-      case 'shadowtls':
-        return _parseShadowTLS(
-          uri,
-          raw,
-        );
-
-      case 'http':
-        return _parseHttp(
-          uri,
-          raw,
-        );
-
-      case 'socks':
-      case 'socks5':
-        return _parseSocks(
-          uri,
-          raw,
-        );
-    }
-
-    return null;
-  }
-
-  // ============================================================
-  // VLESS
-  // ============================================================
-
-  Server? _parseVless(
-    Uri uri,
-    String raw,
-  ) {
-    if (uri.host.isEmpty ||
-        !uri.hasPort ||
-        uri.userInfo.isEmpty) {
-      return null;
-    }
-
-    final q =
-        uri.queryParameters;
-
-    final outbound =
-        <String, dynamic>{
-      'type': 'vless',
-      'server': uri.host,
-      'server_port': uri.port,
-      'uuid':
-          Uri.decodeComponent(
-        uri.userInfo,
-      ),
-    };
-
-    final flow =
-        q['flow'] ?? '';
-
-    if (flow.isNotEmpty) {
-      outbound['flow'] = flow;
-    }
-
-    _applyTls(
-      outbound,
-      q,
-      defaultEnabled:
-          q['security'] == 'tls' ||
-          q['security'] == 'reality',
-      server: uri.host,
-    );
-
-    _applyTransport(
-      outbound,
-      q,
-    );
-
-    return Server(
-      raw: raw,
-      name: _name(
-        uri,
-        'VLESS ${uri.host}',
-      ),
-      type: 'VLESS',
-      host: uri.host,
-      port: uri.port,
-      outbound: outbound,
-    );
-  }
-
-  // ============================================================
-  // VMESS
-  // ============================================================
-
-  Server? _parseVmess(
-    String raw,
-  ) {
+  Server? parseServer(String raw) {
     try {
-      var encoded =
-          raw.substring(
-        raw.indexOf('://') + 3,
+      final uri = Uri.parse(raw);
+      final scheme = uri.scheme.toLowerCase();
+
+      if (scheme == 'vmess') {
+        return parseVmess(raw);
+      }
+
+      if (![
+        'vless',
+        'trojan',
+        'ss',
+        'hysteria2',
+        'hy2',
+        'hysteria',
+        'tuic',
+      ].contains(scheme)) {
+        return null;
+      }
+
+      if (uri.host.isEmpty || !uri.hasPort) {
+        return null;
+      }
+
+      late Map<String, dynamic> outbound;
+
+      if (scheme == 'vless') {
+        outbound = vless(uri);
+      } else if (scheme == 'trojan') {
+        outbound = trojan(uri);
+      } else if (scheme == 'ss') {
+        outbound = shadowsocks(uri, raw) ?? {};
+      } else if (scheme == 'tuic') {
+        outbound = tuic(uri);
+      } else {
+        outbound = hysteria2(uri);
+      }
+
+      if (outbound.isEmpty) {
+        return null;
+      }
+
+      final name = Uri.decodeComponent(
+        uri.fragment.isEmpty
+            ? '${scheme.toUpperCase()} ${uri.host}'
+            : uri.fragment,
       );
 
-      encoded = encoded
+      return Server(
+        raw: raw,
+        name: name,
+        type: scheme.toUpperCase(),
+        host: uri.host,
+        port: uri.port,
+        outbound: outbound,
+      );
+    } catch (_) {
+      return null;
+    }
+  }
+
+  Server? parseVmess(String raw) {
+    try {
+      var data =
+          raw.substring(raw.indexOf('://') + 3);
+
+      data = data
           .replaceAll('-', '+')
           .replaceAll('_', '/');
 
-      encoded += '=' *
-          ((4 - encoded.length % 4) % 4);
+      data +=
+          '=' * ((4 - data.length % 4) % 4);
 
-      final decoded =
-          utf8.decode(
-        base64.decode(encoded),
-        allowMalformed: true,
+      final decoded = utf8.decode(
+        base64.decode(data),
       );
 
       final map =
-          jsonDecode(decoded)
-              as Map<String, dynamic>;
+          json.decode(decoded) as Map<String, dynamic>;
 
-      final host =
-          '${map['add'] ?? ''}';
+      final host = '${map['add'] ?? ''}';
 
       final port =
-          int.tryParse(
-            '${map['port'] ?? ''}',
-          ) ??
-          0;
+          int.tryParse('${map['port'] ?? ''}') ?? 0;
 
-      final uuid =
-          '${map['id'] ?? ''}';
+      final uuid = '${map['id'] ?? ''}';
 
       if (host.isEmpty ||
           port <= 0 ||
@@ -1105,57 +452,37 @@ class _HomePageState extends State<HomePage> {
         return null;
       }
 
-      final outbound =
-          <String, dynamic>{
+      final outbound = <String, dynamic>{
         'type': 'vmess',
         'server': host,
         'server_port': port,
         'uuid': uuid,
-        'security':
-            '${map['scy'] ?? 'auto'}',
+        'security': '${map['scy'] ?? 'auto'}',
       };
 
-      final network =
-          '${map['net'] ?? 'tcp'}';
+      final tls = '${map['tls'] ?? ''}';
 
-      final tls =
-          '${map['tls'] ?? ''}';
+      final sni =
+          '${map['sni'] ?? map['host'] ?? ''}';
 
-      final q =
-          <String, String>{
-        'sni':
-            '${map['sni'] ?? ''}',
-        'host':
-            '${map['host'] ?? ''}',
-        'path':
-            '${map['path'] ?? ''}',
-        'type': network,
-        'security': tls,
-        'fp':
-            '${map['fp'] ?? ''}',
-        'pbk':
-            '${map['pbk'] ?? ''}',
-        'sid':
-            '${map['sid'] ?? ''}',
-      };
+      if (tls.isNotEmpty && tls != 'none') {
+        outbound['tls'] = {
+          'enabled': true,
+          if (sni.isNotEmpty)
+            'server_name': sni,
+        };
+      }
 
-      _applyTls(
+      addTransport(
         outbound,
-        q,
-        defaultEnabled:
-            tls == 'tls',
-        server: host,
-      );
-
-      _applyTransport(
-        outbound,
-        q,
+        '${map['net'] ?? 'tcp'}',
+        '${map['path'] ?? ''}',
+        '${map['host'] ?? ''}',
       );
 
       return Server(
         raw: raw,
-        name:
-            '${map['ps'] ?? 'VMess'}',
+        name: '${map['ps'] ?? 'VMess'}',
         type: 'VMESS',
         host: host,
         port: port,
@@ -1166,1172 +493,308 @@ class _HomePageState extends State<HomePage> {
     }
   }
 
-  // ============================================================
-  // TROJAN
-  // ============================================================
+  Map<String, dynamic> vless(Uri uri) {
+    final p = uri.queryParameters;
 
-  Server? _parseTrojan(
-    Uri uri,
-    String raw,
-  ) {
-    if (uri.host.isEmpty ||
-        !uri.hasPort ||
-        uri.userInfo.isEmpty) {
-      return null;
+    final outbound = <String, dynamic>{
+      'type': 'vless',
+      'server': uri.host,
+      'server_port': uri.port,
+      'uuid': uri.userInfo,
+    };
+
+    if ((p['flow'] ?? '').isNotEmpty) {
+      outbound['flow'] = p['flow'];
     }
 
-    final q =
-        uri.queryParameters;
+    final security =
+        (p['security'] ?? '').toLowerCase();
 
-    final outbound =
-        <String, dynamic>{
+    if (security == 'tls' ||
+        security == 'reality') {
+      final tls = <String, dynamic>{
+        'enabled': true,
+        'server_name':
+            p['sni'] ?? p['host'] ?? uri.host,
+      };
+
+      if ((p['fp'] ?? '').isNotEmpty) {
+        tls['utls'] = {
+          'enabled': true,
+          'fingerprint': p['fp'],
+        };
+      }
+
+      if (security == 'reality' &&
+          (p['pbk'] ?? '').isNotEmpty) {
+        tls['reality'] = {
+          'enabled': true,
+          'public_key': p['pbk'],
+          if ((p['sid'] ?? '').isNotEmpty)
+            'short_id': p['sid'],
+        };
+      }
+
+      outbound['tls'] = tls;
+    }
+
+    addTransport(
+      outbound,
+      p['type'] ??
+          p['network'] ??
+          'tcp',
+      p['path'] ?? '',
+      p['host'] ?? '',
+    );
+
+    return outbound;
+  }
+
+  Map<String, dynamic> trojan(Uri uri) {
+    final p = uri.queryParameters;
+
+    final outbound = <String, dynamic>{
       'type': 'trojan',
       'server': uri.host,
       'server_port': uri.port,
-      'password':
-          Uri.decodeComponent(
-        uri.userInfo,
-      ),
+      'password': uri.userInfo,
+      'tls': {
+        'enabled': true,
+        'server_name':
+            p['sni'] ??
+            p['host'] ??
+            uri.host,
+      },
     };
 
-    _applyTls(
+    addTransport(
       outbound,
-      q,
-      defaultEnabled: true,
-      server: uri.host,
+      p['type'] ?? 'tcp',
+      p['path'] ?? '',
+      p['host'] ?? '',
     );
 
-    _applyTransport(
-      outbound,
-      q,
-    );
-
-    return Server(
-      raw: raw,
-      name: _name(
-        uri,
-        'Trojan ${uri.host}',
-      ),
-      type: 'TROJAN',
-      host: uri.host,
-      port: uri.port,
-      outbound: outbound,
-    );
+    return outbound;
   }
 
-  // ============================================================
-  // SHADOWSOCKS
-  // ============================================================
-
-  Server? _parseShadowsocks(
+  Map<String, dynamic>? shadowsocks(
     Uri uri,
     String raw,
   ) {
     try {
-      String user =
-          uri.userInfo;
+      var user = uri.userInfo;
 
       if (user.isEmpty) {
-        var encoded =
-            raw.substring(
-          raw.indexOf('://') + 3,
-        );
+        var data =
+            raw.substring(raw.indexOf('://') + 3);
 
-        encoded = encoded
+        data = data
             .split('#')
             .first
             .replaceAll('-', '+')
             .replaceAll('_', '/');
 
-        encoded += '=' *
-            ((4 - encoded.length % 4) % 4);
+        data +=
+            '=' * ((4 - data.length % 4) % 4);
 
         user = utf8.decode(
-          base64.decode(encoded),
+          base64.decode(data),
           allowMalformed: true,
         );
       }
 
-      final index =
-          user.indexOf(':');
+      final index = user.indexOf(':');
 
-      if (index <= 0 ||
-          uri.host.isEmpty ||
-          !uri.hasPort) {
-        return null;
-      }
+      if (index <= 0) return null;
 
-      final method =
-          Uri.decodeComponent(
-        user.substring(0, index),
-      );
-
-      final password =
-          Uri.decodeComponent(
-        user.substring(index + 1),
-      );
-
-      final q =
-          uri.queryParameters;
-
-      final outbound =
-          <String, dynamic>{
+      return {
         'type': 'shadowsocks',
         'server': uri.host,
         'server_port': uri.port,
-        'method': method,
-        'password': password,
-      };
-
-      if ((q['plugin'] ?? '')
-          .isNotEmpty) {
-        final plugin =
-            q['plugin']!;
-
-        final parts =
-            plugin.split(';');
-
-        outbound['plugin'] =
-            parts.first;
-
-        if (parts.length > 1) {
-          outbound['plugin_opts'] =
-              parts.skip(1).join(';');
-        }
-      }
-
-      return Server(
-        raw: raw,
-        name: _name(
-          uri,
-          'SS ${uri.host}',
+        'method': Uri.decodeComponent(
+          user.substring(0, index),
         ),
-        type: 'SHADOWSOCKS',
-        host: uri.host,
-        port: uri.port,
-        outbound: outbound,
-      );
+        'password': Uri.decodeComponent(
+          user.substring(index + 1),
+        ),
+      };
     } catch (_) {
       return null;
     }
   }
 
-  // ============================================================
-  // HYSTERIA2
-  // ============================================================
-
-  Server? _parseHysteria2(
-    Uri uri,
-    String raw,
-  ) {
-    if (uri.host.isEmpty ||
-        !uri.hasPort) {
-      return null;
-    }
-
-    final q =
-        uri.queryParameters;
-
-    final password =
-        Uri.decodeComponent(
-      uri.userInfo,
-    );
-
-    final outbound =
-        <String, dynamic>{
-      'type': 'hysteria2',
-      'server': uri.host,
-      'server_port': uri.port,
-      'password': password,
-      'tls': {
-        'enabled': true,
-        'server_name':
-            q['sni'] ??
-            q['peer'] ??
-            uri.host,
-      },
-    };
-
-    if (q['insecure'] == '1' ||
-        q['insecure'] == 'true') {
-      outbound['tls']['insecure'] =
-          true;
-    }
-
-    final obfs =
-        q['obfs'] ?? '';
-
-    final obfsPassword =
-        q['obfs-password'] ??
-            q['obfs_password'] ??
-            '';
-
-    if (obfs.isNotEmpty &&
-        obfsPassword.isNotEmpty) {
-      outbound['obfs'] = {
-        'type': obfs,
-        'password': obfsPassword,
-      };
-    }
-
-    if ((q['hop-interval'] ?? '')
-        .isNotEmpty) {
-      outbound['hop_interval'] =
-          q['hop-interval'];
-    }
-
-    return Server(
-      raw: raw,
-      name: _name(
-        uri,
-        'Hysteria2 ${uri.host}',
-      ),
-      type: 'HYSTERIA2',
-      host: uri.host,
-      port: uri.port,
-      outbound: outbound,
-    );
-  }
-
-  // ============================================================
-  // HYSTERIA
-  // ============================================================
-
-  Server? _parseHysteria(
-    Uri uri,
-    String raw,
-  ) {
-    if (uri.host.isEmpty ||
-        !uri.hasPort) {
-      return null;
-    }
-
-    final q =
-        uri.queryParameters;
-
-    final password =
-        uri.userInfo.isNotEmpty
-            ? Uri.decodeComponent(
-                uri.userInfo,
-              )
-            : (q['auth'] ??
-                q['password'] ??
-                '');
-
-    final outbound =
-        <String, dynamic>{
-      'type': 'hysteria',
-      'server': uri.host,
-      'server_port': uri.port,
-      if (password.isNotEmpty)
-        'auth_str': password,
-      'tls': {
-        'enabled': true,
-        'server_name':
-            q['sni'] ??
-            q['peer'] ??
-            uri.host,
-      },
-    };
-
-    if (q['insecure'] == '1' ||
-        q['insecure'] == 'true') {
-      outbound['tls']['insecure'] =
-          true;
-    }
-
-    return Server(
-      raw: raw,
-      name: _name(
-        uri,
-        'Hysteria ${uri.host}',
-      ),
-      type: 'HYSTERIA',
-      host: uri.host,
-      port: uri.port,
-      outbound: outbound,
-    );
-  }
-
-  // ============================================================
-  // TUIC
-  // ============================================================
-
-  Server? _parseTuic(
-    Uri uri,
-    String raw,
-  ) {
-    if (uri.host.isEmpty ||
-        !uri.hasPort) {
-      return null;
-    }
-
-    final q =
-        uri.queryParameters;
-
-    String uuid = '';
-    String password = '';
-
-    if (uri.userInfo.contains(':')) {
-      final split =
-          uri.userInfo.split(':');
-
-      uuid =
-          Uri.decodeComponent(
-        split.first,
-      );
-
-      password =
-          Uri.decodeComponent(
-        split.sublist(1).join(':'),
-      );
-    } else {
-      uuid =
-          Uri.decodeComponent(
-        q['uuid'] ?? '',
-      );
-
-      password =
-          Uri.decodeComponent(
-        q['password'] ?? '',
-      );
-    }
-
-    if (uuid.isEmpty ||
-        password.isEmpty) {
-      return null;
-    }
-
-    final outbound =
-        <String, dynamic>{
-      'type': 'tuic',
-      'server': uri.host,
-      'server_port': uri.port,
-      'uuid': uuid,
-      'password': password,
-      'congestion_control':
-          q['congestion_control'] ??
-          'cubic',
-      'udp_relay_mode':
-          q['udp_relay_mode'] ??
-          'native',
-      'zero_rtt_handshake':
-          q['zero_rtt_handshake'] ==
-              'true',
-      'tls': {
-        'enabled': true,
-        'server_name':
-            q['sni'] ??
-            q['server_name'] ??
-            uri.host,
-      },
-    };
-
-    return Server(
-      raw: raw,
-      name: _name(
-        uri,
-        'TUIC ${uri.host}',
-      ),
-      type: 'TUIC',
-      host: uri.host,
-      port: uri.port,
-      outbound: outbound,
-    );
-  }
-
-  // ============================================================
-  // ANYTLS
-  // ============================================================
-
-  Server? _parseAnyTLS(
-    Uri uri,
-    String raw,
-  ) {
-    if (uri.host.isEmpty ||
-        !uri.hasPort ||
-        uri.userInfo.isEmpty) {
-      return null;
-    }
-
-    final q =
-        uri.queryParameters;
-
-    final outbound =
-        <String, dynamic>{
-      'type': 'anytls',
-      'server': uri.host,
-      'server_port': uri.port,
-      'password':
-          Uri.decodeComponent(
-        uri.userInfo,
-      ),
-      'tls': {
-        'enabled': true,
-        'server_name':
-            q['sni'] ??
-            uri.host,
-      },
-    };
-
-    return Server(
-      raw: raw,
-      name: _name(
-        uri,
-        'AnyTLS ${uri.host}',
-      ),
-      type: 'ANYTLS',
-      host: uri.host,
-      port: uri.port,
-      outbound: outbound,
-    );
-  }
-
-  // ============================================================
-  // SHADOWTLS
-  // ============================================================
-
-  Server? _parseShadowTLS(
-    Uri uri,
-    String raw,
-  ) {
-    if (uri.host.isEmpty ||
-        !uri.hasPort) {
-      return null;
-    }
-
-    final q =
-        uri.queryParameters;
-
-    final password =
-        Uri.decodeComponent(
-      uri.userInfo,
-    );
-
-    final version =
-        int.tryParse(
-          q['version'] ?? '3',
-        ) ??
-        3;
-
-    final outbound =
-        <String, dynamic>{
-      'type': 'shadowtls',
-      'server': uri.host,
-      'server_port': uri.port,
-      'version': version,
-      if (password.isNotEmpty)
-        'password': password,
-      'tls': {
-        'enabled': true,
-        'server_name':
-            q['sni'] ??
-            q['host'] ??
-            uri.host,
-      },
-    };
-
-    return Server(
-      raw: raw,
-      name: _name(
-        uri,
-        'ShadowTLS ${uri.host}',
-      ),
-      type: 'SHADOWTLS',
-      host: uri.host,
-      port: uri.port,
-      outbound: outbound,
-    );
-  }
-
-  // ============================================================
-  // HTTP PROXY
-  // ============================================================
-
-  Server? _parseHttp(
-    Uri uri,
-    String raw,
-  ) {
-    if (uri.host.isEmpty ||
-        !uri.hasPort) {
-      return null;
-    }
-
-    final outbound =
-        <String, dynamic>{
-      'type': 'http',
-      'server': uri.host,
-      'server_port': uri.port,
-    };
-
-    if (uri.userInfo.isNotEmpty) {
-      final split =
-          uri.userInfo.split(':');
-
-      if (split.isNotEmpty) {
-        outbound['username'] =
-            Uri.decodeComponent(
-          split.first,
-        );
-      }
-
-      if (split.length > 1) {
-        outbound['password'] =
-            Uri.decodeComponent(
-          split.sublist(1).join(':'),
-        );
-      }
-    }
-
-    final q =
-        uri.queryParameters;
-
-    if (q['security'] == 'tls' ||
-        q['tls'] == '1') {
-      outbound['tls'] = {
-        'enabled': true,
-        'server_name':
-            q['sni'] ??
-            uri.host,
-      };
-    }
-
-    return Server(
-      raw: raw,
-      name: _name(
-        uri,
-        'HTTP ${uri.host}',
-      ),
-      type: 'HTTP',
-      host: uri.host,
-      port: uri.port,
-      outbound: outbound,
-    );
-  }
-
-  // ============================================================
-  // SOCKS
-  // ============================================================
-
-  Server? _parseSocks(
-    Uri uri,
-    String raw,
-  ) {
-    if (uri.host.isEmpty ||
-        !uri.hasPort) {
-      return null;
-    }
-
-    final outbound =
-        <String, dynamic>{
-      'type': 'socks',
-      'server': uri.host,
-      'server_port': uri.port,
-      'version': '5',
-    };
-
-    if (uri.userInfo.isNotEmpty) {
-      final split =
-          uri.userInfo.split(':');
-
-      if (split.isNotEmpty) {
-        outbound['username'] =
-            Uri.decodeComponent(
-          split.first,
-        );
-      }
-
-      if (split.length > 1) {
-        outbound['password'] =
-            Uri.decodeComponent(
-          split.sublist(1).join(':'),
-        );
-      }
-    }
-
-    return Server(
-      raw: raw,
-      name: _name(
-        uri,
-        'SOCKS ${uri.host}',
-      ),
-      type: 'SOCKS',
-      host: uri.host,
-      port: uri.port,
-      outbound: outbound,
-    );
-  }
-
-  // ============================================================
-  // TLS
-  // ============================================================
-
-  void _applyTls(
-    Map<String, dynamic> outbound,
-    Map<String, String> q, {
-    required bool defaultEnabled,
-    required String server,
-  }) {
-    final security =
-        (q['security'] ?? '')
-            .toLowerCase();
-
-    final enabled =
-        defaultEnabled ||
-        security == 'tls' ||
-        security == 'reality';
-
-    if (!enabled) {
-      return;
-    }
-
-    final serverName =
-        q['sni'] ??
-        q['serverName'] ??
-        q['server_name'] ??
-        q['host'] ??
-        server;
-
-    final tls =
-        <String, dynamic>{
-      'enabled': true,
-      'server_name': serverName,
-    };
-
-    final fp =
-        q['fp'] ??
-        q['fingerprint'] ??
-        '';
-
-    if (fp.isNotEmpty) {
-      tls['utls'] = {
-        'enabled': true,
-        'fingerprint': fp,
-      };
-    }
-
-    if (security == 'reality') {
-      final publicKey =
-          q['pbk'] ??
-          q['publicKey'] ??
-          '';
-
-      final shortId =
-          q['sid'] ??
-          q['shortId'] ??
-          '';
-
-      if (publicKey.isNotEmpty) {
-        tls['reality'] = {
-          'enabled': true,
-          'public_key': publicKey,
-          if (shortId.isNotEmpty)
-            'short_id': shortId,
-        };
-      }
-    }
-
-    outbound['tls'] = tls;
-  }
-
-  // ============================================================
-  // V2RAY TRANSPORT
-  // ============================================================
-
-  void _applyTransport(
-    Map<String, dynamic> outbound,
-    Map<String, String> q,
-  ) {
-    final network =
-        (q['type'] ??
-                q['network'] ??
-                'tcp')
-            .toLowerCase();
-
-    final path =
-        q['path'] ?? '';
-
-    final host =
-        q['host'] ??
-        q['Host'] ??
-        '';
-
-    switch (network) {
-      case 'ws':
-      case 'websocket':
-        outbound['transport'] = {
-          'type': 'ws',
-          'path':
-              path.isEmpty ? '/' : path,
-          if (host.isNotEmpty)
-            'headers': {
-              'Host': host,
-            },
-        };
-        break;
-
-      case 'grpc':
-        outbound['transport'] = {
-          'type': 'grpc',
-          'service_name': path,
-        };
-        break;
-
-      case 'httpupgrade':
-      case 'http-upgrade':
-        outbound['transport'] = {
-          'type': 'httpupgrade',
-          'path':
-              path.isEmpty ? '/' : path,
-          if (host.isNotEmpty)
-            'host': host,
-        };
-        break;
-
-      case 'h2':
-      case 'http':
-        outbound['transport'] = {
-          'type': 'http',
-          'path':
-              path.isEmpty ? '/' : path,
-          if (host.isNotEmpty)
-            'host': [host],
-        };
-        break;
-
-      case 'quic':
-        outbound['transport'] = {
-          'type': 'quic',
-        };
-        break;
-
-      case 'tcp':
-      default:
-        break;
-    }
-  }
-
-  // ============================================================
-  // CLASH -> SING-BOX
-  // ============================================================
-
-  Map<String, dynamic>? _clashVless(
-    Map<String, dynamic> p,
-  ) {
-    final uuid =
-        '${p['uuid'] ?? ''}';
-
-    final server =
-        '${p['server'] ?? ''}';
-
-    final port =
-        int.tryParse(
-          '${p['port'] ?? 0}',
-        ) ??
-        0;
-
-    if (uuid.isEmpty ||
-        server.isEmpty ||
-        port <= 0) {
-      return null;
-    }
-
-    final o =
-        <String, dynamic>{
-      'type': 'vless',
-      'server': server,
-      'server_port': port,
-      'uuid': uuid,
-    };
-
-    if ('${p['flow'] ?? ''}'
-        .isNotEmpty) {
-      o['flow'] =
-          '${p['flow']}';
-    }
-
-    if (p['tls'] == true) {
-      o['tls'] = {
-        'enabled': true,
-        'server_name':
-            '${p['servername'] ?? server}',
-      };
-    }
-
-    final network =
-        '${p['network'] ?? ''}';
-
-    if (network == 'ws') {
-      final wsOpts =
-          p['ws-opts'];
-
-      String path = '/';
-      String host = '';
-
-      if (wsOpts is Map) {
-        path =
-            '${wsOpts['path'] ?? '/'}';
-
-        final headers =
-            wsOpts['headers'];
-
-        if (headers is Map) {
-          host =
-              '${headers['Host'] ?? ''}';
-        }
-      }
-
-      o['transport'] = {
-        'type': 'ws',
-        'path': path,
-        if (host.isNotEmpty)
-          'headers': {
-            'Host': host,
-          },
-      };
-    }
-
-    return o;
-  }
-
-  Map<String, dynamic>? _clashVmess(
-    Map<String, dynamic> p,
-  ) {
-    final uuid =
-        '${p['uuid'] ?? ''}';
-
-    final server =
-        '${p['server'] ?? ''}';
-
-    final port =
-        int.tryParse(
-          '${p['port'] ?? 0}',
-        ) ??
-        0;
-
-    if (uuid.isEmpty ||
-        server.isEmpty ||
-        port <= 0) {
-      return null;
-    }
-
-    final o =
-        <String, dynamic>{
-      'type': 'vmess',
-      'server': server,
-      'server_port': port,
-      'uuid': uuid,
-      'security':
-          '${p['cipher'] ?? 'auto'}',
-    };
-
-    if (p['tls'] == true) {
-      o['tls'] = {
-        'enabled': true,
-        'server_name':
-            '${p['servername'] ?? server}',
-      };
-    }
-
-    return o;
-  }
-
-  Map<String, dynamic>? _clashTrojan(
-    Map<String, dynamic> p,
-  ) {
-    final password =
-        '${p['password'] ?? ''}';
-
-    final server =
-        '${p['server'] ?? ''}';
-
-    final port =
-        int.tryParse(
-          '${p['port'] ?? 0}',
-        ) ??
-        0;
-
-    if (password.isEmpty ||
-        server.isEmpty ||
-        port <= 0) {
-      return null;
-    }
-
-    return {
-      'type': 'trojan',
-      'server': server,
-      'server_port': port,
-      'password': password,
-      'tls': {
-        'enabled': true,
-        'server_name':
-            '${p['sni'] ?? p['servername'] ?? server}',
-      },
-    };
-  }
-
-  Map<String, dynamic>? _clashShadowsocks(
-    Map<String, dynamic> p,
-  ) {
-    final server =
-        '${p['server'] ?? ''}';
-
-    final port =
-        int.tryParse(
-          '${p['port'] ?? 0}',
-        ) ??
-        0;
-
-    final method =
-        '${p['cipher'] ?? ''}';
-
-    final password =
-        '${p['password'] ?? ''}';
-
-    if (server.isEmpty ||
-        port <= 0 ||
-        method.isEmpty ||
-        password.isEmpty) {
-      return null;
-    }
-
-    return {
-      'type': 'shadowsocks',
-      'server': server,
-      'server_port': port,
-      'method': method,
-      'password': password,
-    };
-  }
-
-  Map<String, dynamic>? _clashHysteria2(
-    Map<String, dynamic> p,
-  ) {
-    final server =
-        '${p['server'] ?? ''}';
-
-    final port =
-        int.tryParse(
-          '${p['port'] ?? 0}',
-        ) ??
-        0;
-
-    final password =
-        '${p['password'] ?? ''}';
-
-    if (server.isEmpty ||
-        port <= 0) {
-      return null;
-    }
+  Map<String, dynamic> hysteria2(Uri uri) {
+    final p = uri.queryParameters;
 
     return {
       'type': 'hysteria2',
-      'server': server,
-      'server_port': port,
-      'password': password,
+      'server': uri.host,
+      'server_port': uri.port,
+      'password': uri.userInfo,
       'tls': {
         'enabled': true,
         'server_name':
-            '${p['sni'] ?? server}',
-        if (p['skip-cert-verify'] == true)
+            p['sni'] ??
+            p['peer'] ??
+            uri.host,
+        if (p['insecure'] == '1')
           'insecure': true,
       },
     };
   }
 
-  Map<String, dynamic>? _clashTuic(
-    Map<String, dynamic> p,
-  ) {
-    final server =
-        '${p['server'] ?? ''}';
-
-    final port =
-        int.tryParse(
-          '${p['port'] ?? 0}',
-        ) ??
-        0;
-
-    final uuid =
-        '${p['uuid'] ?? ''}';
-
-    final password =
-        '${p['password'] ?? ''}';
-
-    if (server.isEmpty ||
-        port <= 0 ||
-        uuid.isEmpty ||
-        password.isEmpty) {
-      return null;
-    }
+  Map<String, dynamic> tuic(Uri uri) {
+    final p = uri.queryParameters;
 
     return {
       'type': 'tuic',
-      'server': server,
-      'server_port': port,
-      'uuid': uuid,
-      'password': password,
+      'server': uri.host,
+      'server_port': uri.port,
+      'uuid': uri.userInfo,
+      'password': p['password'] ?? '',
+      'congestion_control':
+          p['congestion_control'] ?? 'bbr',
       'tls': {
         'enabled': true,
         'server_name':
-            '${p['sni'] ?? server}',
+            p['sni'] ?? uri.host,
       },
     };
   }
 
-  // ============================================================
-  // HOST:PORT
-  // ============================================================
-
-  (String, int) _splitHostPort(
-    String value,
+  void addTransport(
+    Map<String, dynamic> outbound,
+    String network,
+    String path,
+    String host,
   ) {
-    final text =
-        value.trim();
+    final n = network.toLowerCase();
 
-    if (text.startsWith('[')) {
-      final end =
-          text.indexOf(']');
+    if (n == 'ws' ||
+        n == 'websocket') {
+      outbound['transport'] = {
+        'type': 'ws',
+        'path': path.isEmpty ? '/' : path,
+        if (host.isNotEmpty)
+          'headers': {'Host': host},
+      };
+    } else if (n == 'grpc') {
+      outbound['transport'] = {
+        'type': 'grpc',
+        'service_name': path,
+      };
+    } else if (n == 'httpupgrade') {
+      outbound['transport'] = {
+        'type': 'httpupgrade',
+        'path': path.isEmpty ? '/' : path,
+        if (host.isNotEmpty) 'host': host,
+      };
+    } else if (n == 'h2' ||
+        n == 'http') {
+      outbound['transport'] = {
+        'type': 'http',
+        'path': path.isEmpty ? '/' : path,
+        if (host.isNotEmpty)
+          'host': [host],
+      };
+    }
+  }
 
-      if (end > 0) {
-        final host =
-            text.substring(
-          1,
-          end,
+  Future<void> testAll({
+    bool silent = false,
+  }) async {
+    if (servers.isEmpty) return;
+
+    if (!silent && mounted) {
+      setState(() {
+        testing = true;
+        stateText = 'در حال تست Ping...';
+      });
+    }
+
+    for (final server in servers) {
+      final stopwatch = Stopwatch()..start();
+
+      try {
+        final socket = await Socket.connect(
+          server.host,
+          server.port,
+          timeout: const Duration(seconds: 3),
         );
 
-        var port = 0;
+        socket.destroy();
 
-        if (text.length > end + 1 &&
-            text[end + 1] == ':') {
-          port =
-              int.tryParse(
-                text.substring(
-                  end + 2,
-                ),
-              ) ??
-              0;
-        }
+        server.ping =
+            stopwatch.elapsedMilliseconds;
+      } catch (_) {
+        server.ping = null;
+      }
 
-        return (
-          host,
-          port,
-        );
+      if (mounted && !silent) {
+        setState(() {});
       }
     }
 
-    final index =
-        text.lastIndexOf(':');
+    servers.sort((a, b) {
+      if (a.ping == null &&
+          b.ping == null) {
+        return 0;
+      }
 
-    if (index > 0) {
-      final host =
-          text.substring(
-        0,
-        index,
-      );
+      if (a.ping == null) return 1;
 
-      final port =
-          int.tryParse(
-            text.substring(
-              index + 1,
-            ),
-          ) ??
-          0;
+      if (b.ping == null) return -1;
 
-      return (
-        host,
-        port,
-      );
-    }
+      return a.ping!.compareTo(b.ping!);
+    });
 
-    return (
-      text,
-      0,
-    );
-  }
+    if (mounted) {
+      setState(() {
+        testing = false;
 
-  String _name(
-    Uri uri,
-    String fallback,
-  ) {
-    if (uri.fragment.isEmpty) {
-      return fallback;
-    }
-
-    try {
-      return Uri.decodeComponent(
-        uri.fragment,
-      );
-    } catch (_) {
-      return uri.fragment;
+        if (!silent) {
+          stateText =
+              'تست سرورها تمام شد';
+        }
+      });
     }
   }
 
-  // ============================================================
-  // SING-BOX CONFIG
-  // ============================================================
-
-  String _buildConfig() {
-    final valid =
-        servers
-            .where(
-              (s) => s.usable,
-            )
-            .toList();
-
-    if (valid.isEmpty) {
+  String buildConfig() {
+    if (servers.isEmpty) {
       throw Exception(
-        'هیچ outbound معتبری وجود ندارد',
+        'هیچ سروری وجود ندارد',
       );
     }
 
-    final outbounds =
+    final nodes =
         <Map<String, dynamic>>[];
 
-    final tags =
-        <String>[];
+    final tags = <String>[];
 
     for (int i = 0;
-        i < valid.length;
+        i < servers.length;
         i++) {
-      final server =
-          valid[i];
-
       final outbound =
-          _deepCopyMap(
-        server.outbound,
+          Map<String, dynamic>.from(
+        servers[i].outbound,
       );
 
-      final tag =
-          'node-$i';
+      final tag = 'node-$i';
 
-      outbound['tag'] =
-          tag;
+      outbound['tag'] = tag;
 
-      outbounds.add(
-        outbound,
-      );
-
+      nodes.add(outbound);
       tags.add(tag);
     }
 
-    /*
-     * Direct برای DNS/local/fallback.
-     */
-    outbounds.add({
+    nodes.add({
       'type': 'direct',
       'tag': 'direct',
     });
 
-    final useAuto =
-        tags.length > 1;
-
-    /*
-     * اگر بیش از یک سرور داریم،
-     * sing-box خودش بهترین مسیر را
-     * با URLTest انتخاب می‌کند.
-     */
-    if (useAuto) {
-      outbounds.add({
+    if (tags.length > 1) {
+      nodes.add({
         'type': 'urltest',
         'tag': 'auto',
         'outbounds': tags,
@@ -2345,24 +808,10 @@ class _HomePageState extends State<HomePage> {
       });
     }
 
-    /*
-     * ==========================================================
-     * CONFIG اصلی sing-box
-     * ==========================================================
-     *
-     * IPv4 ONLY
-     *
-     * هیچ آدرس IPv6 در TUN نداریم.
-     */
-
     return jsonEncode({
       'log': {
         'level': 'info',
       },
-
-      // --------------------------------------------------------
-      // DNS
-      // --------------------------------------------------------
 
       'dns': {
         'servers': [
@@ -2371,79 +820,37 @@ class _HomePageState extends State<HomePage> {
             'tag': 'local',
           },
         ],
-
         'final': 'local',
-
-        /*
-         * فقط IPv4
-         */
         'strategy': 'ipv4_only',
       },
-
-      // --------------------------------------------------------
-      // TUN
-      // --------------------------------------------------------
 
       'inbounds': [
         {
           'type': 'tun',
           'tag': 'tun-in',
 
-          /*
-           * فقط IPv4
-           */
+          // IPv4 only
           'address': [
             '172.19.0.1/30',
           ],
 
           'mtu': 1500,
-
-          /*
-           * mixed یعنی TCP و UDP
-           */
           'stack': 'mixed',
-
-          /*
-           * تمام ترافیک سیستم
-           * وارد TUN می‌شود.
-           */
           'auto_route': true,
 
-          /*
-           * DNS داخل TUN
-           * توسط sing-box کنترل می‌شود.
-           */
           'dns_mode': 'hijack',
 
-          /*
-           * فقط IPv4
-           */
           'dns_address': [
             '172.19.0.2',
           ],
         },
       ],
 
-      // --------------------------------------------------------
-      // OUTBOUNDS
-      // --------------------------------------------------------
-
-      'outbounds':
-          outbounds,
-
-      // --------------------------------------------------------
-      // ROUTE
-      // --------------------------------------------------------
+      'outbounds': nodes,
 
       'route': {
-        /*
-         * Android VPN/TUN
-         */
         'override_android_vpn': true,
 
-        /*
-         * DNS را hijack می‌کنیم.
-         */
         'rules': [
           {
             'protocol': 'dns',
@@ -2451,130 +858,34 @@ class _HomePageState extends State<HomePage> {
           },
         ],
 
-        /*
-         * اگر چند سرور باشد:
-         *
-         * auto = URLTest
-         *
-         * اگر یک سرور باشد:
-         *
-         * همان node
-         */
         'final':
-            useAuto
+            tags.length > 1
                 ? 'auto'
                 : tags.first,
       },
     });
   }
 
-  Map<String, dynamic> _deepCopyMap(
-    Map<String, dynamic> source,
-  ) {
-    final decoded =
-        jsonDecode(
-      jsonEncode(source),
-    );
-
-    return Map<String, dynamic>.from(
-      decoded,
-    );
-  }
-
-  // ============================================================
-  // SERVER TEST
-  // ============================================================
-
-  Future<void> testAllServers() async {
-    if (servers.isEmpty) {
-      return;
-    }
-
-    if (mounted) {
-      setState(() {
-        testing = true;
-        stateText =
-            'در حال بررسی سرورها...';
-      });
-    }
-
-    /*
-     * این Ping فقط TCP Diagnostic است.
-     *
-     * تصمیم نهایی اتصال با URLTest
-     * خود sing-box انجام می‌شود.
-     *
-     * بنابراین اگر TCP مستقیم شکست خورد،
-     * سرور را حذف نمی‌کنیم.
-     */
-
-    for (final server in servers) {
-      final stopwatch =
-          Stopwatch()..start();
-
-      try {
-        final socket =
-            await Socket.connect(
-          server.host,
-          server.port,
-          timeout:
-              const Duration(
-            seconds: 3,
-          ),
-        );
-
-        socket.destroy();
-
-        server.ping =
-            stopwatch.elapsedMilliseconds;
-      } catch (_) {
-        server.ping = null;
-      }
-
-      if (mounted) {
-        setState(() {});
-      }
-    }
-
-    if (mounted) {
-      setState(() {
-        testing = false;
-        stateText =
-            '${servers.length} سرور آماده اتصال';
-      });
-    }
-  }
-
-  // ============================================================
-  // CONNECT
-  // ============================================================
-
   Future<void> connect() async {
     if (servers.isEmpty) {
-      _showMessage(
-        'ابتدا Subscription را دریافت کن',
+      snack(
+        'ابتدا از بخش اشتراک کانفیگ را وارد کن',
       );
       return;
     }
 
-    if (connected ||
-        connecting) {
+    if (connected || connecting) {
       return;
     }
 
     setState(() {
       connecting = true;
-      lastFault = '';
-      internetStatus =
-          'در حال اتصال...';
       stateText =
           'در حال آماده‌سازی VPN...';
+      lastFault = '';
     });
 
     try {
-      /*
-       * درخواست مجوز Android VpnService
-       */
       final permission =
           await vpn.requestVPNPermission();
 
@@ -2584,45 +895,27 @@ class _HomePageState extends State<HomePage> {
         );
       }
 
-      /*
-       * تمام سرورها وارد sing-box می‌شوند.
-       */
-      final config =
-          _buildConfig();
-
-      if (!mounted) return;
+      final config = buildConfig();
 
       setState(() {
         stateText =
             'در حال بررسی کانفیگ...';
       });
 
-      /*
-       * بررسی واقعی config توسط core
-       */
-      await vpn.checkConfig(
-        config,
-      );
-
-      if (!mounted) return;
+      await vpn.checkConfig(config);
 
       setState(() {
         stateText =
-            'در حال راه‌اندازی TUN...';
+            'در حال اتصال...';
       });
 
-      /*
-       * VPN واقعی Android
-       */
       await vpn.connect(
         SessionOptions(
           config: config,
-          networkMode:
-              NetworkMode.vpn,
+          networkMode: NetworkMode.vpn,
           notification:
               NotificationConfig(
-            title:
-                'Light speed 🔥',
+            title: 'Light speed 🔥',
             showTrafficStats: true,
             showStopButton: true,
             stopButtonLabel:
@@ -2636,46 +929,33 @@ class _HomePageState extends State<HomePage> {
       setState(() {
         connected = true;
         connecting = false;
-
-        connectedAt =
-            DateTime.now();
-
-        downloadBps = 0;
-        uploadBps = 0;
-
-        downloadTotalBytes = 0;
-        uploadTotalBytes = 0;
-
-        downloadHistory.clear();
-        uploadHistory.clear();
-
-        internetStatus =
-            '🟡 در انتظار عبور ترافیک...';
-
         stateText =
-            'VPN متصل است';
+            'متصل • انتخاب خودکار سرور';
       });
 
-      _startDuration();
+      connectedAt = DateTime.now();
 
-      /*
-       * چند ثانیه زمان می‌دهیم تا TUN
-       * و route کاملاً فعال شوند.
-       */
-      Future.delayed(
-        const Duration(seconds: 3),
-        () {
-          if (mounted &&
-              connected) {
-            testInternet();
+      durationTimer?.cancel();
+
+      durationTimer = Timer.periodic(
+        const Duration(seconds: 1),
+        (_) {
+          if (!mounted ||
+              !connected ||
+              connectedAt == null) {
+            return;
           }
+
+          setState(() {
+            connectionDuration =
+                DateTime.now()
+                    .difference(
+              connectedAt!,
+            );
+          });
         },
       );
     } catch (e) {
-      /*
-       * اگر connect نصفه‌کاره انجام شده باشد،
-       * تلاش می‌کنیم سرویس را تمیز قطع کنیم.
-       */
       try {
         await vpn.disconnect();
       } catch (_) {}
@@ -2683,148 +963,22 @@ class _HomePageState extends State<HomePage> {
       if (!mounted) return;
 
       setState(() {
-        connected = false;
         connecting = false;
-
-        stateText =
-            'اتصال ناموفق';
-
-        internetStatus =
-            '🔴 اینترنت عبور نمی‌کند';
-
-        lastFault =
-            e.toString();
+        connected = false;
+        stateText = 'اتصال ناموفق';
+        lastFault = e.toString();
       });
 
-      _showMessage(
-        'اتصال ناموفق بود؛ خطای sing-box را بررسی کن',
+      snack(
+        'خطای VPN: $e',
       );
     }
   }
-
-  // ============================================================
-  // INTERNET TEST
-  // ============================================================
-
-  Future<void> testInternet() async {
-    if (!connected ||
-        internetTestRunning) {
-      return;
-    }
-
-    setState(() {
-      internetTestRunning = true;
-
-      /*
-       * هنوز TrafficStats را معیار اصلی
-       * قرار می‌دهیم.
-       */
-      if (!internetStatus.contains('🟢')) {
-        internetStatus =
-            'در حال تست اینترنت...';
-      }
-    });
-
-    HttpClient? client;
-
-    try {
-      client =
-          HttpClient();
-
-      client.connectionTimeout =
-          const Duration(
-        seconds: 8,
-      );
-
-      final request =
-          await client.getUrl(
-        Uri.parse(
-          'https://www.gstatic.com/generate_204',
-        ),
-      );
-
-      request.headers.set(
-        HttpHeaders.userAgentHeader,
-        'LightSpeed/2.0',
-      );
-
-      request.headers.set(
-        HttpHeaders.cacheControlHeader,
-        'no-cache',
-      );
-
-      final response =
-          await request.close().timeout(
-        const Duration(
-          seconds: 8,
-        ),
-      );
-
-      await response.drain();
-
-      if (!mounted) return;
-
-      if (response.statusCode == 204 ||
-          (response.statusCode >= 200 &&
-              response.statusCode < 400)) {
-        /*
-         * این تست موفق است، ولی TrafficStats
-         * همچنان معیار قوی‌تر برای عبور
-         * واقعی داده است.
-         */
-        if (!internetStatus.contains('🟢')) {
-          setState(() {
-            internetStatus =
-                '🟢 اینترنت در دسترس است';
-          });
-        }
-      } else {
-        if (!internetStatus.contains('🟢')) {
-          setState(() {
-            internetStatus =
-                '🔴 پاسخ اینترنت نامعتبر';
-          });
-        }
-      }
-    } catch (e) {
-      /*
-       * اگر TrafficStats قبلاً ترافیک نشان دهد،
-       * این تست را به عنوان خطای VPN ثبت نمی‌کنیم.
-       */
-      if (!mounted) return;
-
-      if (!internetStatus.contains('🟢')) {
-        setState(() {
-          internetStatus =
-              '🟠 تست اینترنت ناموفق';
-        });
-      }
-    } finally {
-      client?.close();
-
-      if (mounted) {
-        setState(() {
-          internetTestRunning = false;
-        });
-      }
-    }
-  }
-
-  // ============================================================
-  // DISCONNECT
-  // ============================================================
 
   Future<void> disconnect() async {
     try {
       await vpn.disconnect();
-    } catch (e) {
-      if (mounted) {
-        setState(() {
-          lastFault =
-              'Disconnect: $e';
-        });
-      }
-    }
+    } catch (_) {}
 
     durationTimer?.cancel();
 
@@ -2833,828 +987,918 @@ class _HomePageState extends State<HomePage> {
     setState(() {
       connected = false;
       connecting = false;
+      stateText = 'اتصال قطع شد';
 
-      stateText =
-          'اتصال قطع شد';
-
-      internetStatus =
-          'VPN قطع است';
-
-      connectedAt = null;
-
-      connectionDuration =
-          Duration.zero;
-
-      downloadBps = 0;
-      uploadBps = 0;
+      download = '0 Mbps';
+      upload = '0 Mbps';
 
       downloadTotalBytes = 0;
       uploadTotalBytes = 0;
 
-      downloadHistory.clear();
-      uploadHistory.clear();
+      connectionDuration =
+          Duration.zero;
     });
   }
 
-  // ============================================================
-  // DURATION
-  // ============================================================
+  String speed(dynamic bps) {
+    final n = bps is num
+        ? bps.toDouble()
+        : 0.0;
 
-  void _startDuration() {
-    durationTimer?.cancel();
+    if (n >= 1000000000) {
+      return '${(n / 1000000000).toStringAsFixed(2)} Gbps';
+    }
 
-    durationTimer =
-        Timer.periodic(
-      const Duration(seconds: 1),
-      (_) {
-        if (!mounted ||
-            !connected ||
-            connectedAt == null) {
-          return;
-        }
+    if (n >= 1000000) {
+      return '${(n / 1000000).toStringAsFixed(2)} Mbps';
+    }
 
-        setState(() {
-          connectionDuration =
-              DateTime.now().difference(
-            connectedAt!,
-          );
-        });
-      },
-    );
+    if (n >= 1000) {
+      return '${(n / 1000).toStringAsFixed(1)} Kbps';
+    }
+
+    return '${n.toStringAsFixed(0)} bps';
   }
 
-  // ============================================================
-  // FORMAT
-  // ============================================================
-
-  String _formatSpeed(
-    double bps,
-  ) {
-    if (bps <= 0) {
-      return '0 Mbps';
-    }
-
-    if (bps >= 1000000000) {
-      return
-          '${(bps / 1000000000).toStringAsFixed(2)} Gbps';
-    }
-
-    if (bps >= 1000000) {
-      return
-          '${(bps / 1000000).toStringAsFixed(2)} Mbps';
-    }
-
-    if (bps >= 1000) {
-      return
-          '${(bps / 1000).toStringAsFixed(1)} Kbps';
-    }
-
-    return
-        '${bps.toStringAsFixed(0)} bps';
-  }
-
-  String _formatBytes(
-    int? bytes,
-  ) {
-    if (bytes == null ||
-        bytes <= 0) {
+  String size(int? n) {
+    if (n == null || n <= 0) {
       return 'نامشخص';
     }
 
-    if (bytes < 1024) {
-      return '$bytes B';
+    if (n < 1024 * 1024) {
+      return '${(n / 1024).toStringAsFixed(1)} KB';
     }
 
-    if (bytes <
-        1024 * 1024) {
-      return
-          '${(bytes / 1024).toStringAsFixed(1)} KB';
+    if (n < 1024 * 1024 * 1024) {
+      return '${(n / 1024 / 1024).toStringAsFixed(1)} MB';
     }
 
-    if (bytes <
-        1024 * 1024 * 1024) {
-      return
-          '${(bytes / 1024 / 1024).toStringAsFixed(1)} MB';
-    }
-
-    return
-        '${(bytes / 1024 / 1024 / 1024).toStringAsFixed(2)} GB';
+    return '${(n / 1024 / 1024 / 1024).toStringAsFixed(2)} GB';
   }
 
-  String _formatDuration(
-    Duration d,
-  ) {
-    final h =
-        d.inHours
-            .toString()
-            .padLeft(2, '0');
-
-    final m =
-        (d.inMinutes % 60)
-            .toString()
-            .padLeft(2, '0');
-
-    final s =
-        (d.inSeconds % 60)
-            .toString()
-            .padLeft(2, '0');
-
-    return '$h:$m:$s';
-  }
-
-  int _remainingBytes() {
-    if (totalBytes == null) {
-      return 0;
-    }
-
-    return max(
-      0,
-      totalBytes! -
-          (usedBytes ?? 0),
-    );
-  }
-
-  String _expiryText() {
+  String remaining() {
     if (expireAt == null ||
         expireAt! <= 0) {
       return 'نامشخص';
     }
 
-    final expiry =
+    final expire =
         DateTime.fromMillisecondsSinceEpoch(
       expireAt! * 1000,
     );
 
-    final remaining =
-        expiry.difference(
-      DateTime.now(),
-    );
+    final difference =
+        expire.difference(DateTime.now());
 
-    if (remaining.isNegative) {
+    if (difference.isNegative) {
       return 'منقضی شده';
     }
 
-    final days =
-        remaining.inDays;
-
-    final hours =
-        remaining.inHours % 24;
-
-    return '$days روز و $hours ساعت';
+    return '${difference.inDays} روز و '
+        '${difference.inHours % 24} ساعت';
   }
 
-  void _showMessage(
-    String message,
-  ) {
-    if (!mounted) return;
+  String connectionTime() {
+    final h = connectionDuration
+        .inHours
+        .toString()
+        .padLeft(2, '0');
 
-    ScaffoldMessenger.of(
-      context,
-    ).showSnackBar(
+    final m = (connectionDuration
+            .inMinutes %
+        60)
+        .toString()
+        .padLeft(2, '0');
+
+    final s = (connectionDuration
+            .inSeconds %
+        60)
+        .toString()
+        .padLeft(2, '0');
+
+    return '$h:$m:$s';
+  }
+
+  void snack(String text) {
+    ScaffoldMessenger.of(context)
+        .showSnackBar(
       SnackBar(
-        content:
-            Text(message),
-        behavior:
-            SnackBarBehavior.floating,
+        content: Text(text),
       ),
     );
   }
 
-  // ============================================================
-  // UI
-  // ============================================================
-
   @override
-  Widget build(
-    BuildContext context,
-  ) {
+  Widget build(BuildContext context) {
+    final pages = [
+      _home(),
+      _servers(),
+      _traffic(),
+      _subscription(),
+      _settings(),
+    ];
+
     return Directionality(
-      textDirection:
-          TextDirection.rtl,
+      textDirection: TextDirection.rtl,
       child: Scaffold(
         body: SafeArea(
-          child: _home(),
+          child: pages[page],
         ),
+
+        // هیچ قفل مرحله‌ای اینجا وجود ندارد.
         bottomNavigationBar:
             NavigationBar(
+          selectedIndex: page,
+          onDestinationSelected: (index) {
+            setState(() {
+              page = index;
+            });
+          },
           destinations: const [
             NavigationDestination(
               icon:
                   Icon(Icons.home_outlined),
-              selectedIcon:
-                  Icon(Icons.home),
               label: 'خانه',
             ),
             NavigationDestination(
               icon:
                   Icon(Icons.dns_outlined),
-              selectedIcon:
-                  Icon(Icons.dns),
               label: 'سرورها',
             ),
             NavigationDestination(
-              icon:
-                  Icon(Icons.bar_chart_outlined),
-              selectedIcon:
-                  Icon(Icons.bar_chart),
+              icon: Icon(
+                Icons.bar_chart_outlined,
+              ),
               label: 'ترافیک',
             ),
             NavigationDestination(
               icon:
                   Icon(Icons.link_outlined),
-              selectedIcon:
-                  Icon(Icons.link),
               label: 'اشتراک',
             ),
             NavigationDestination(
-              icon:
-                  Icon(Icons.settings_outlined),
-              selectedIcon:
-                  Icon(Icons.settings),
+              icon: Icon(
+                Icons.settings_outlined,
+              ),
               label: 'تنظیمات',
             ),
           ],
-          onDestinationSelected:
-              (index) {
-            /*
-             * ظاهر فعلی حفظ شده.
-             */
-            _showMessage(
-              'بخش $index در مرحله بعدی فعال می‌شود',
-            );
-          },
         ),
       ),
     );
   }
 
+  Widget header(
+    String title,
+    String subtitle,
+  ) {
+    return Padding(
+      padding:
+          const EdgeInsets.only(
+        bottom: 18,
+      ),
+      child: Row(
+        children: [
+          Container(
+            width: 46,
+            height: 46,
+            decoration:
+                const BoxDecoration(
+              shape: BoxShape.circle,
+              gradient:
+                  LinearGradient(
+                colors: [
+                  Color(0xFF00E5FF),
+                  Color(0xFF7C4DFF),
+                ],
+              ),
+            ),
+            child: const Icon(
+              Icons.bolt,
+              color: Colors.white,
+            ),
+          ),
+          const SizedBox(width: 12),
+          Column(
+            crossAxisAlignment:
+                CrossAxisAlignment.start,
+            children: [
+              Text(
+                title,
+                style:
+                    const TextStyle(
+                  fontSize: 22,
+                  fontWeight:
+                      FontWeight.w800,
+                ),
+              ),
+              Text(
+                subtitle,
+                style:
+                    const TextStyle(
+                  color: Colors.white54,
+                ),
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget card(Widget child) {
+    return Container(
+      margin:
+          const EdgeInsets.only(
+        bottom: 12,
+      ),
+      padding:
+          const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color:
+            const Color(0xFF0D1728),
+        borderRadius:
+            BorderRadius.circular(22),
+        border: Border.all(
+          color:
+              Colors.white.withOpacity(.05),
+        ),
+      ),
+      child: child,
+    );
+  }
+
   Widget _home() {
-    final alive =
-        servers
-            .where(
-              (s) => s.ping != null,
-            )
-            .length;
+    final percent =
+        totalBytes == null ||
+                totalBytes! <= 0
+            ? 0.0
+            : ((usedBytes ?? 0) /
+                    totalBytes!)
+                .clamp(0.0, 1.0);
 
     return ListView(
       padding:
           const EdgeInsets.all(18),
       children: [
+        header(
+          'Light speed 🔥',
+          'اتصال واقعی با sing-box',
+        ),
+
         const SizedBox(height: 8),
 
-        Row(
-          children: [
-            Container(
-              width: 52,
-              height: 52,
+        Center(
+          child: GestureDetector(
+            onTap: connecting
+                ? null
+                : (connected
+                    ? disconnect
+                    : connect),
+            child: Container(
+              width: 200,
+              height: 200,
               decoration:
-                  const BoxDecoration(
-                shape: BoxShape.circle,
+                  BoxDecoration(
+                shape:
+                    BoxShape.circle,
                 gradient:
                     LinearGradient(
-                  colors: [
-                    Color(0xFF00E5FF),
-                    Color(0xFF7C4DFF),
-                  ],
+                  colors: connected
+                      ? const [
+                          Color(0xFF00E676),
+                          Color(0xFF00B8D4),
+                        ]
+                      : const [
+                          Color(0xFF00E5FF),
+                          Color(0xFF7C4DFF),
+                        ],
                 ),
-              ),
-              child: const Icon(
-                Icons.bolt,
-                size: 30,
-              ),
-            ),
-            const SizedBox(
-              width: 12,
-            ),
-            Expanded(
-              child: Column(
-                crossAxisAlignment:
-                    CrossAxisAlignment.start,
-                children: [
-                  const Text(
-                    'Light speed 🔥',
-                    style:
-                        TextStyle(
-                      fontSize: 23,
-                      fontWeight:
-                          FontWeight.bold,
-                    ),
-                  ),
-                  Text(
-                    stateText,
-                    style:
-                        const TextStyle(
-                      color:
-                          Colors.white54,
-                    ),
+                boxShadow: [
+                  BoxShadow(
+                    color:
+                        (connected
+                                ? const Color(
+                                    0xFF00E676,
+                                  )
+                                : const Color(
+                                    0xFF00E5FF,
+                                  ))
+                            .withOpacity(.35),
+                    blurRadius: 40,
+                    spreadRadius: 8,
                   ),
                 ],
               ),
+              child: Center(
+                child: Container(
+                  width: 176,
+                  height: 176,
+                  decoration:
+                      const BoxDecoration(
+                    shape:
+                        BoxShape.circle,
+                    color:
+                        Color(0xFF081322),
+                  ),
+                  child: Center(
+                    child: connecting
+                        ? const CircularProgressIndicator()
+                        : Column(
+                            mainAxisAlignment:
+                                MainAxisAlignment
+                                    .center,
+                            children: [
+                              Icon(
+                                connected
+                                    ? Icons.power
+                                    : Icons.bolt,
+                                size: 48,
+                                color: connected
+                                    ? const Color(
+                                        0xFF00E676,
+                                      )
+                                    : const Color(
+                                        0xFF00E5FF,
+                                      ),
+                              ),
+                              const SizedBox(
+                                height: 8,
+                              ),
+                              Text(
+                                connected
+                                    ? 'قطع اتصال'
+                                    : 'اتصال',
+                                style:
+                                    const TextStyle(
+                                  fontSize: 18,
+                                  fontWeight:
+                                      FontWeight.bold,
+                                ),
+                              ),
+                            ],
+                          ),
+                  ),
+                ),
+              ),
             ),
-            IconButton(
-              onPressed:
-                  loading || connected
-                      ? null
-                      : () =>
-                          loadSubscription(),
-              icon:
-                  const Icon(Icons.refresh),
+          ),
+        ),
+
+        const SizedBox(height: 16),
+
+        Center(
+          child: Text(
+            stateText,
+            style: TextStyle(
+              color: connected
+                  ? const Color(
+                      0xFF00E676,
+                    )
+                  : Colors.white70,
             ),
-          ],
+          ),
         ),
 
-        const SizedBox(
-          height: 25,
-        ),
+        const SizedBox(height: 20),
 
-        _connectButton(),
-
-        const SizedBox(
-          height: 20,
-        ),
-
-        _internetCard(),
-
-        const SizedBox(
-          height: 10,
+        card(
+          Row(
+            children: [
+              const Icon(
+                Icons.public,
+                color:
+                    Color(0xFF00E5FF),
+              ),
+              const SizedBox(
+                width: 12,
+              ),
+              Expanded(
+                child: Text(
+                  servers.isEmpty
+                      ? 'هنوز کانفیگی وارد نشده'
+                      : '${servers.length} سرور آماده اتصال',
+                ),
+              ),
+              if (servers.isNotEmpty)
+                Text(
+                  '${servers.where((s) => s.ping != null).length} تست‌شده',
+                ),
+            ],
+          ),
         ),
 
         Row(
           children: [
             Expanded(
-              child: _statCard(
-                Icons.dns,
-                'سرورها',
-                '${servers.length}',
+              child: card(
+                Column(
+                  crossAxisAlignment:
+                      CrossAxisAlignment.start,
+                  children: [
+                    const Text(
+                      'دانلود',
+                      style:
+                          TextStyle(
+                        color:
+                            Colors.white54,
+                      ),
+                    ),
+                    Text(
+                      download,
+                      style:
+                          const TextStyle(
+                        fontSize: 18,
+                        fontWeight:
+                            FontWeight.bold,
+                      ),
+                    ),
+                  ],
+                ),
               ),
             ),
-            const SizedBox(
-              width: 10,
-            ),
+            const SizedBox(width: 10),
             Expanded(
-              child: _statCard(
-                Icons.check_circle,
-                'قابل بررسی',
-                '$alive',
+              child: card(
+                Column(
+                  crossAxisAlignment:
+                      CrossAxisAlignment.start,
+                  children: [
+                    const Text(
+                      'آپلود',
+                      style:
+                          TextStyle(
+                        color:
+                            Colors.white54,
+                      ),
+                    ),
+                    Text(
+                      upload,
+                      style:
+                          const TextStyle(
+                        fontSize: 18,
+                        fontWeight:
+                            FontWeight.bold,
+                      ),
+                    ),
+                  ],
+                ),
               ),
             ),
           ],
         ),
 
-        Row(
-          children: [
-            Expanded(
-              child: _statCard(
-                Icons.download,
-                'دانلود',
-                _formatSpeed(
-                  downloadBps,
+        card(
+          Column(
+            crossAxisAlignment:
+                CrossAxisAlignment.start,
+            children: [
+              Row(
+                children: [
+                  const Icon(
+                    Icons.data_usage,
+                    color:
+                        Color(0xFF7C4DFF),
+                  ),
+                  const SizedBox(
+                    width: 8,
+                  ),
+                  const Expanded(
+                    child:
+                        Text('حجم اشتراک'),
+                  ),
+                  Text(
+                    size(totalBytes),
+                  ),
+                ],
+              ),
+              const SizedBox(
+                height: 12,
+              ),
+              LinearProgressIndicator(
+                value: percent,
+                minHeight: 9,
+              ),
+              const SizedBox(
+                height: 10,
+              ),
+              Text(
+                'مصرف: ${size(usedBytes)}',
+              ),
+              const SizedBox(
+                height: 8,
+              ),
+              Text(
+                'زمان باقی‌مانده: ${remaining()}',
+              ),
+            ],
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _servers() {
+    return ListView(
+      padding:
+          const EdgeInsets.all(18),
+      children: [
+        header(
+          'سرورها',
+          '${servers.length} سرور',
+        ),
+
+        FilledButton.icon(
+          onPressed:
+              testing ? null : () => testAll(),
+          icon: const Icon(
+            Icons.speed,
+          ),
+          label: Text(
+            testing
+                ? 'در حال تست...'
+                : 'تست Ping همه سرورها',
+          ),
+        ),
+
+        const SizedBox(
+          height: 14,
+        ),
+
+        if (servers.isEmpty)
+          card(
+            const Center(
+              child: Padding(
+                padding:
+                    EdgeInsets.all(24),
+                child: Text(
+                  'هنوز سروری وارد نشده است.\n'
+                  'از بخش «اشتراک» Subscription را وارد کن.',
+                  textAlign:
+                      TextAlign.center,
                 ),
               ),
             ),
-            const SizedBox(
-              width: 10,
-            ),
-            Expanded(
-              child: _statCard(
-                Icons.upload,
-                'آپلود',
-                _formatSpeed(
-                  uploadBps,
+          ),
+
+        ...servers
+            .asMap()
+            .entries
+            .map(
+              (entry) => card(
+                ListTile(
+                  contentPadding:
+                      EdgeInsets.zero,
+                  leading:
+                      CircleAvatar(
+                    child: Text(
+                      '${entry.key + 1}',
+                    ),
+                  ),
+                  title: Text(
+                    entry.value.name,
+                    maxLines: 1,
+                    overflow:
+                        TextOverflow.ellipsis,
+                  ),
+                  subtitle: Text(
+                    '${entry.value.type} • '
+                    '${entry.value.host}:'
+                    '${entry.value.port}',
+                    maxLines: 1,
+                    overflow:
+                        TextOverflow.ellipsis,
+                  ),
+                  trailing: Text(
+                    entry.value.ping ==
+                            null
+                        ? '---'
+                        : '${entry.value.ping} ms',
+                  ),
                 ),
               ),
             ),
-          ],
+      ],
+    );
+  }
+
+  Widget _traffic() {
+    return ListView(
+      padding:
+          const EdgeInsets.all(18),
+      children: [
+        header(
+          'ترافیک',
+          'آمار زنده VPN',
         ),
 
-        _infoCard(
-          Icons.download_done,
-          'دریافت این جلسه',
-          _formatBytes(
-            downloadTotalBytes,
+        card(
+          ListTile(
+            title:
+                const Text('دانلود'),
+            subtitle:
+                Text(download),
+            leading:
+                const Icon(
+              Icons.download,
+            ),
           ),
-          'VPN',
         ),
 
-        _infoCard(
-          Icons.upload_file,
-          'ارسال این جلسه',
-          _formatBytes(
-            uploadTotalBytes,
+        card(
+          ListTile(
+            title:
+                const Text('آپلود'),
+            subtitle:
+                Text(upload),
+            leading:
+                const Icon(
+              Icons.upload,
+            ),
           ),
-          'VPN',
         ),
 
-        _infoCard(
-          Icons.timer,
-          'مدت اتصال',
-          _formatDuration(
-            connectionDuration,
+        card(
+          ListTile(
+            title: const Text(
+              'حجم مصرف‌شده اشتراک',
+            ),
+            subtitle:
+                Text(size(usedBytes)),
+            leading:
+                const Icon(
+              Icons.data_usage,
+            ),
           ),
-          'VPN',
         ),
 
-        _infoCard(
-          Icons.data_usage,
-          'مصرف اشتراک',
-          _formatBytes(
-            usedBytes,
+        card(
+          ListTile(
+            title: const Text(
+              'دانلود این جلسه',
+            ),
+            subtitle: Text(
+              size(
+                downloadTotalBytes,
+              ),
+            ),
+            leading:
+                const Icon(
+              Icons.download,
+            ),
           ),
-          'باقی‌مانده: ${_formatBytes(_remainingBytes())}',
         ),
 
-        _infoCard(
-          Icons.event,
-          'انقضا',
-          _expiryText(),
+        card(
+          ListTile(
+            title: const Text(
+              'آپلود این جلسه',
+            ),
+            subtitle: Text(
+              size(
+                uploadTotalBytes,
+              ),
+            ),
+            leading:
+                const Icon(
+              Icons.upload,
+            ),
+          ),
+        ),
+
+        card(
+          ListTile(
+            title: const Text(
+              'حجم باقی‌مانده',
+            ),
+            subtitle: Text(
+              size(
+                totalBytes == null
+                    ? null
+                    : max(
+                        0,
+                        totalBytes! -
+                            (usedBytes ??
+                                0),
+                      ),
+              ),
+            ),
+            leading:
+                const Icon(
+              Icons.storage,
+            ),
+          ),
+        ),
+
+        card(
+          ListTile(
+            title:
+                const Text('مدت اتصال'),
+            subtitle:
+                Text(connectionTime()),
+            leading:
+                const Icon(
+              Icons.timer,
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _subscription() {
+    return ListView(
+      padding:
+          const EdgeInsets.all(18),
+      children: [
+        header(
           'Subscription',
+          'مدیریت اشتراک',
+        ),
+
+        TextField(
+          controller: url,
+          textDirection:
+              TextDirection.ltr,
+          decoration:
+              const InputDecoration(
+            labelText:
+                'Subscription URL',
+            prefixIcon:
+                Icon(Icons.link),
+            border:
+                OutlineInputBorder(),
+          ),
+        ),
+
+        const SizedBox(
+          height: 12,
+        ),
+
+        Row(
+          children: [
+            Expanded(
+              child:
+                  FilledButton.icon(
+                onPressed: loading
+                    ? null
+                    : () =>
+                        loadSubscription(),
+                icon: const Icon(
+                  Icons.refresh,
+                ),
+                label: Text(
+                  loading
+                      ? 'در حال دریافت...'
+                      : 'دریافت و بروزرسانی',
+                ),
+              ),
+            ),
+
+            const SizedBox(
+              width: 8,
+            ),
+
+            IconButton(
+              onPressed: () {
+                setState(() {
+                  url.clear();
+                });
+              },
+              icon: const Icon(
+                Icons.clear,
+              ),
+            ),
+          ],
+        ),
+
+        const SizedBox(
+          height: 18,
+        ),
+
+        card(
+          Column(
+            crossAxisAlignment:
+                CrossAxisAlignment.start,
+            children: [
+              Text(
+                'تعداد سرورها: ${servers.length}',
+              ),
+              const SizedBox(
+                height: 8,
+              ),
+              Text(
+                'حجم کل: ${size(totalBytes)}',
+              ),
+              Text(
+                'مصرف: ${size(usedBytes)}',
+              ),
+              Text(
+                'زمان باقی‌مانده: ${remaining()}',
+              ),
+              const SizedBox(
+                height: 8,
+              ),
+              const Text(
+                'بروزرسانی خودکار: هر ۱۵ دقیقه',
+                style:
+                    TextStyle(
+                  color:
+                      Colors.white54,
+                ),
+              ),
+            ],
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _settings() {
+    return ListView(
+      padding:
+          const EdgeInsets.all(18),
+      children: [
+        header(
+          'تنظیمات',
+          'Light speed',
+        ),
+
+        card(
+          const ListTile(
+            leading:
+                Icon(Icons.flash_on),
+            title:
+                Text('انتخاب خودکار سرور'),
+            subtitle: Text(
+              'sing-box URLTest بهترین مسیر را انتخاب می‌کند',
+            ),
+          ),
+        ),
+
+        card(
+          const ListTile(
+            leading:
+                Icon(Icons.language),
+            title:
+                Text('شبکه'),
+            subtitle:
+                Text('IPv4 / TUN'),
+          ),
+        ),
+
+        card(
+          const ListTile(
+            leading:
+                Icon(Icons.sync),
+            title:
+                Text('Auto Refresh'),
+            subtitle:
+                Text('هر ۱۵ دقیقه'),
+          ),
+        ),
+
+        card(
+          ListTile(
+            leading:
+                const Icon(
+              Icons.shield,
+            ),
+            title:
+                const Text('VPN Engine'),
+            subtitle: Text(
+              'sing-box / Android VpnService\n'
+              '$stateText',
+            ),
+          ),
         ),
 
         if (lastFault.isNotEmpty)
-          Container(
-            margin:
-                const EdgeInsets.only(
-              top: 10,
-            ),
-            padding:
-                const EdgeInsets.all(14),
-            decoration:
-                BoxDecoration(
-              color:
-                  Colors.red.withValues(
-                alpha: .10,
+          card(
+            ListTile(
+              leading:
+                  const Icon(
+                Icons.error_outline,
               ),
-              borderRadius:
-                  BorderRadius.circular(
-                16,
-              ),
-            ),
-            child: Text(
-              'خطای اخیر:\n$lastFault',
-              style:
-                  const TextStyle(
-                color:
-                    Colors.redAccent,
-                fontSize: 12,
-              ),
+              title:
+                  const Text('آخرین خطا'),
+              subtitle:
+                  Text(lastFault),
             ),
           ),
       ],
     );
   }
 
-  Widget _internetCard() {
-    final good =
-        internetStatus.contains('🟢');
-
-    final bad =
-        internetStatus.contains('🔴');
-
-    final color = good
-        ? Colors.greenAccent
-        : bad
-            ? Colors.redAccent
-            : Colors.white54;
-
-    return Container(
-      padding:
-          const EdgeInsets.all(16),
-      decoration:
-          BoxDecoration(
-        color:
-            const Color(0xFF0D1728),
-        borderRadius:
-            BorderRadius.circular(
-          20,
-        ),
-        border: Border.all(
-          color:
-              color.withValues(
-            alpha: .25,
-          ),
-        ),
-      ),
-      child: Row(
-        children: [
-          Icon(
-            good
-                ? Icons.wifi
-                : bad
-                    ? Icons.wifi_off
-                    : Icons.wifi_find,
-            color: color,
-            size: 30,
-          ),
-          const SizedBox(
-            width: 12,
-          ),
-          Expanded(
-            child: Column(
-              crossAxisAlignment:
-                  CrossAxisAlignment.start,
-              children: [
-                const Text(
-                  'وضعیت عبور اینترنت',
-                  style:
-                      TextStyle(
-                    color:
-                        Colors.white54,
-                  ),
-                ),
-                const SizedBox(
-                  height: 4,
-                ),
-                Text(
-                  internetStatus,
-                  style:
-                      TextStyle(
-                    color: color,
-                    fontWeight:
-                        FontWeight.bold,
-                  ),
-                ),
-              ],
-            ),
-          ),
-          if (internetTestRunning)
-            const SizedBox(
-              width: 20,
-              height: 20,
-              child:
-                  CircularProgressIndicator(
-                strokeWidth: 2,
-              ),
-            )
-          else
-            IconButton(
-              onPressed:
-                  connected
-                      ? testInternet
-                      : null,
-              icon:
-                  const Icon(
-                Icons.refresh,
-              ),
-            ),
-        ],
-      ),
-    );
-  }
-
-  Widget _connectButton() {
-    final color = connected
-        ? const Color(0xFF00E676)
-        : const Color(0xFF00E5FF);
-
-    return Center(
-      child: GestureDetector(
-        onTap: connecting
-            ? null
-            : connected
-                ? disconnect
-                : connect,
-        child: Container(
-          width: 210,
-          height: 210,
-          decoration:
-              BoxDecoration(
-            shape: BoxShape.circle,
-            gradient:
-                LinearGradient(
-              colors: connected
-                  ? const [
-                      Color(0xFF00E676),
-                      Color(0xFF00B8D4),
-                    ]
-                  : const [
-                      Color(0xFF00E5FF),
-                      Color(0xFF7C4DFF),
-                    ],
-            ),
-            boxShadow: [
-              BoxShadow(
-                color:
-                    color.withValues(
-                  alpha: .30,
-                ),
-                blurRadius: 45,
-                spreadRadius: 5,
-              ),
-            ],
-          ),
-          child: Center(
-            child: Container(
-              width: 184,
-              height: 184,
-              decoration:
-                  const BoxDecoration(
-                shape: BoxShape.circle,
-                color:
-                    Color(0xFF081322),
-              ),
-              child: Center(
-                child: connecting
-                    ? const CircularProgressIndicator()
-                    : Column(
-                        mainAxisAlignment:
-                            MainAxisAlignment
-                                .center,
-                        children: [
-                          Icon(
-                            connected
-                                ? Icons.power
-                                : Icons.bolt,
-                            size: 50,
-                            color: color,
-                          ),
-                          const SizedBox(
-                            height: 8,
-                          ),
-                          Text(
-                            connected
-                                ? 'قطع اتصال'
-                                : 'اتصال',
-                            style:
-                                const TextStyle(
-                              fontSize: 18,
-                              fontWeight:
-                                  FontWeight.bold,
-                            ),
-                          ),
-                        ],
-                      ),
-              ),
-            ),
-          ),
-        ),
-      ),
-    );
-  }
-
-  Widget _statCard(
-    IconData icon,
-    String title,
-    String value,
-  ) {
-    return Container(
-      margin:
-          const EdgeInsets.only(
-        bottom: 10,
-      ),
-      padding:
-          const EdgeInsets.all(15),
-      decoration:
-          BoxDecoration(
-        color:
-            const Color(0xFF0D1728),
-        borderRadius:
-            BorderRadius.circular(
-          20,
-        ),
-      ),
-      child: Column(
-        children: [
-          Icon(
-            icon,
-            size: 30,
-            color:
-                const Color(0xFF00E5FF),
-          ),
-          const SizedBox(
-            height: 7,
-          ),
-          Text(
-            title,
-            style:
-                const TextStyle(
-              color:
-                  Colors.white54,
-            ),
-          ),
-          const SizedBox(
-            height: 3,
-          ),
-          Text(
-            value,
-            style:
-                const TextStyle(
-              fontSize: 17,
-              fontWeight:
-                  FontWeight.bold,
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _infoCard(
-    IconData icon,
-    String title,
-    String value,
-    String subtitle,
-  ) {
-    return Container(
-      margin:
-          const EdgeInsets.only(
-        bottom: 10,
-      ),
-      padding:
-          const EdgeInsets.all(16),
-      decoration:
-          BoxDecoration(
-        color:
-            const Color(0xFF0D1728),
-        borderRadius:
-            BorderRadius.circular(
-          20,
-        ),
-        border: Border.all(
-          color:
-              Colors.white.withValues(
-            alpha: .04,
-          ),
-        ),
-      ),
-      child: Row(
-        children: [
-          Container(
-            width: 48,
-            height: 48,
-            decoration:
-                BoxDecoration(
-              color:
-                  const Color(
-                0xFF00E5FF,
-              ).withValues(
-                alpha: .10,
-              ),
-              borderRadius:
-                  BorderRadius.circular(
-                15,
-              ),
-            ),
-            child: Icon(
-              icon,
-              color:
-                  const Color(0xFF00E5FF),
-            ),
-          ),
-          const SizedBox(
-            width: 12,
-          ),
-          Expanded(
-            child: Column(
-              crossAxisAlignment:
-                  CrossAxisAlignment.start,
-              children: [
-                Text(
-                  title,
-                  style:
-                      const TextStyle(
-                    color:
-                        Colors.white54,
-                  ),
-                ),
-                const SizedBox(
-                  height: 3,
-                ),
-                Text(
-                  value,
-                  style:
-                      const TextStyle(
-                    fontSize: 18,
-                    fontWeight:
-                        FontWeight.bold,
-                  ),
-                ),
-              ],
-            ),
-          ),
-          Text(
-            subtitle,
-            style:
-                const TextStyle(
-              color:
-                  Colors.white38,
-              fontSize: 11,
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
   @override
   void dispose() {
-    stateSubscription?.cancel();
-    trafficSubscription?.cancel();
-    faultSubscription?.cancel();
+    stateSub?.cancel();
+    trafficSub?.cancel();
 
     refreshTimer?.cancel();
     durationTimer?.cancel();
 
-    urlController.dispose();
+    url.dispose();
 
     super.dispose();
   }
