@@ -1,7 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
-import 'dart:math';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_singbox_client/flutter_singbox_client.dart';
@@ -255,7 +254,9 @@ class _HomePageState extends State<HomePage>
         });
       },
       onError: (Object error) {
-        debugPrint('VPN state stream error: $error');
+        debugPrint(
+          'VPN state stream error: $error',
+        );
       },
     );
 
@@ -275,11 +276,15 @@ class _HomePageState extends State<HomePage>
                 stats.uplinkTotalBytes;
           });
         } catch (e) {
-          debugPrint('Traffic stats error: $e');
+          debugPrint(
+            'Traffic stats error: $e',
+          );
         }
       },
       onError: (Object error) {
-        debugPrint('Traffic stream error: $error');
+        debugPrint(
+          'Traffic stream error: $error',
+        );
       },
     );
 
@@ -289,7 +294,9 @@ class _HomePageState extends State<HomePage>
 
         final message = error.toString();
 
-        debugPrint('SINGBOX FAULT: $message');
+        debugPrint(
+          'SINGBOX FAULT: $message',
+        );
 
         setState(() {
           stateText = 'خطای VPN';
@@ -302,15 +309,14 @@ class _HomePageState extends State<HomePage>
         );
       },
       onError: (Object error) {
-        debugPrint('Fault stream error: $error');
+        debugPrint(
+          'Fault stream error: $error',
+        );
       },
     );
 
     // ------------------------------------------------------------------------
     // Network quality
-    //
-    // dynamic is intentional here so minor model-property differences between
-    // flutter_singbox_client versions don't break compilation.
     // ------------------------------------------------------------------------
 
     networkQualitySub =
@@ -322,39 +328,42 @@ class _HomePageState extends State<HomePage>
           final dynamic p = progress;
 
           final running =
-              _dynamicBool(p, 'isRunning') ?? false;
+              _dynamicBool(
+                    p,
+                    'isRunning',
+                  ) ??
+                  false;
 
-          final down =
-              _dynamicNum(
+          final double down =
+              (_dynamicNum(
                     p,
                     'downloadCapacityBps',
                   ) ??
-                  0;
+                  0)
+              .toDouble();
 
-          final up =
-              _dynamicNum(
+          final double up =
+              (_dynamicNum(
                     p,
                     'uploadCapacityBps',
                   ) ??
-                  0;
+                  0)
+              .toDouble();
 
-          final latency =
-              _dynamicInt(
-                p,
-                'idleLatencyMs',
-              );
+          final latency = _dynamicInt(
+            p,
+            'idleLatencyMs',
+          );
 
-          final dRpm =
-              _dynamicInt(
-                p,
-                'downloadRPM',
-              );
+          final dRpm = _dynamicInt(
+            p,
+            'downloadRPM',
+          );
 
-          final uRpm =
-              _dynamicInt(
-                p,
-                'uploadRPM',
-              );
+          final uRpm = _dynamicInt(
+            p,
+            'uploadRPM',
+          );
 
           setState(() {
             networkTestRunning = running;
@@ -404,25 +413,26 @@ class _HomePageState extends State<HomePage>
           final dynamic p = progress;
 
           final running =
-              _dynamicBool(p, 'isRunning') ?? false;
+              _dynamicBool(
+                    p,
+                    'isRunning',
+                  ) ??
+                  false;
 
-          final latency =
-              _dynamicInt(
-                p,
-                'latencyMs',
-              );
+          final latency = _dynamicInt(
+            p,
+            'latencyMs',
+          );
 
-          final ip =
-              _dynamicString(
-                p,
-                'externalIp',
-              );
+          final ip = _dynamicString(
+            p,
+            'externalIp',
+          );
 
-          final nat =
-              _dynamicString(
-                p,
-                'natType',
-              );
+          final nat = _dynamicString(
+            p,
+            'natType',
+          );
 
           setState(() {
             stunTestRunning = running;
@@ -567,23 +577,19 @@ class _HomePageState extends State<HomePage>
       final prefs =
           await SharedPreferences.getInstance();
 
-      final saved =
-          prefs.getString(
+      final saved = prefs.getString(
         'subscription_url',
       );
 
-      final savedMode =
-          prefs.getString(
+      final savedMode = prefs.getString(
         'selection_mode',
       );
 
-      final savedServer =
-          prefs.getString(
+      final savedServer = prefs.getString(
         'selected_server_raw',
       );
 
-      final savedLastUpdate =
-          prefs.getString(
+      final savedLastUpdate = prefs.getString(
         'last_update',
       );
 
@@ -594,8 +600,7 @@ class _HomePageState extends State<HomePage>
 
       lastUpdate = savedLastUpdate;
 
-      if (saved != null &&
-          saved.isNotEmpty) {
+      if (saved != null && saved.isNotEmpty) {
         url.text = saved;
 
         await loadSubscription(
@@ -645,8 +650,7 @@ class _HomePageState extends State<HomePage>
   // ==========================================================================
 
   Future<void> addSubscription() async {
-    final controller =
-        TextEditingController(
+    final controller = TextEditingController(
       text: url.text,
     );
 
@@ -730,8 +734,7 @@ class _HomePageState extends State<HomePage>
     bool silent = false,
     String? restoreSelectedRaw,
   }) async {
-    final subscription =
-        url.text.trim();
+    final subscription = url.text.trim();
 
     if (subscription.isEmpty) {
       if (!silent && mounted) {
@@ -810,7 +813,6 @@ class _HomePageState extends State<HomePage>
         allowMalformed: true,
       );
 
-      // Subscription info
       _readUserInfo(
         responseHeader(
           response.headers,
@@ -821,23 +823,20 @@ class _HomePageState extends State<HomePage>
       final rawLines =
           decodeSubscription(body);
 
-      final parsed =
-          <Server>[];
+      final parsed = <Server>[];
 
       final fingerprints =
           <String>{};
 
       for (final line in rawLines) {
-        final server =
-            parseServer(line);
+        final server = parseServer(line);
 
         if (server == null) {
           continue;
         }
 
-        final key = _serverFingerprint(
-          server,
-        );
+        final key =
+            _serverFingerprint(server);
 
         if (fingerprints.add(key)) {
           parsed.add(server);
@@ -851,8 +850,7 @@ class _HomePageState extends State<HomePage>
       }
 
       final prefs =
-          await SharedPreferences
-              .getInstance();
+          await SharedPreferences.getInstance();
 
       await prefs.setString(
         'subscription_url',
@@ -912,10 +910,6 @@ class _HomePageState extends State<HomePage>
         );
       }
 
-      // Auto mode:
-      // only run a full server test when user explicitly updates the
-      // subscription. Silent background refresh doesn't unexpectedly
-      // switch the selected server.
       if (selectionMode ==
               ServerSelectionMode.auto &&
           !silent) {
@@ -958,11 +952,9 @@ class _HomePageState extends State<HomePage>
     Map<String, String> headers,
     String wanted,
   ) {
-    final target =
-        wanted.toLowerCase();
+    final target = wanted.toLowerCase();
 
-    for (final entry
-        in headers.entries) {
+    for (final entry in headers.entries) {
       if (entry.key.toLowerCase() ==
           target) {
         return entry.value;
@@ -982,13 +974,10 @@ class _HomePageState extends State<HomePage>
       return;
     }
 
-    final values =
-        <String, int>{};
+    final values = <String, int>{};
 
-    for (final item
-        in raw.split(';')) {
-      final index =
-          item.indexOf('=');
+    for (final item in raw.split(';')) {
+      final index = item.indexOf('=');
 
       if (index <= 0) continue;
 
@@ -1058,37 +1047,31 @@ class _HomePageState extends State<HomePage>
   // ==========================================================================
 
   List<String> decodeSubscription(
-    String body,
-  ) {
-    final result =
-        <String>[];
+    String body, {
+    int depth = 0,
+  }) {
+    final result = <String>[];
 
-    final trimmed =
-        body.trim();
+    if (depth > 4) {
+      return result;
+    }
+
+    var trimmed =
+        body.replaceFirst('\uFEFF', '').trim();
 
     if (trimmed.isEmpty) {
       return result;
     }
 
     // ------------------------------------------------------------------------
-    // 1. Direct URI lines
+    // 1. Extract URI lines
     // ------------------------------------------------------------------------
 
-    final directLines = trimmed
-        .split(RegExp(r'\r?\n'))
-        .map(
-          (e) => e.trim(),
-        )
-        .where(
-          (e) =>
-              e.isNotEmpty &&
-              _looksLikeConfig(e),
-        )
-        .toList();
+    final directLines = _extractConfigLines(
+      trimmed,
+    );
 
-    if (directLines.isNotEmpty) {
-      result.addAll(directLines);
-    }
+    result.addAll(directLines);
 
     // ------------------------------------------------------------------------
     // 2. JSON / sing-box JSON
@@ -1105,41 +1088,62 @@ class _HomePageState extends State<HomePage>
     }
 
     // ------------------------------------------------------------------------
-    // 3. Base64 / URL-safe Base64
+    // 3. Sometimes JSON is wrapped in whitespace/comments
     // ------------------------------------------------------------------------
 
     if (result.isEmpty) {
-      final decoded =
-          _tryDecodeBase64Text(
-        trimmed,
-      );
+      final jsonStart =
+          _findJsonStart(trimmed);
 
-      if (decoded != null &&
-          decoded.isNotEmpty) {
-        final nested =
-            decodeSubscription(
-          decoded,
+      if (jsonStart >= 0) {
+        final possibleJson =
+            trimmed.substring(jsonStart);
+
+        result.addAll(
+          _decodeJsonSubscription(
+            possibleJson,
+          ),
         );
-
-        result.addAll(nested);
       }
     }
 
     // ------------------------------------------------------------------------
-    // 4. Final cleanup
+    // 4. Base64 / URL-safe Base64
     // ------------------------------------------------------------------------
 
-    final unique =
-        <String>{};
+    if (result.isEmpty) {
+      final decoded =
+          _tryDecodeBase64Text(trimmed);
 
-    final clean =
-        <String>[];
+      if (decoded != null &&
+          decoded.isNotEmpty &&
+          decoded.trim() != trimmed) {
+        result.addAll(
+          decodeSubscription(
+            decoded,
+            depth: depth + 1,
+          ),
+        );
+      }
+    }
+
+    // ------------------------------------------------------------------------
+    // 5. Final cleanup + deduplication
+    // ------------------------------------------------------------------------
+
+    final unique = <String>{};
+    final clean = <String>[];
 
     for (final line in result) {
-      final value =
-          line.trim();
+      var value = line.trim();
 
-      if (value.isEmpty) continue;
+      if (value.isEmpty) {
+        continue;
+      }
+
+      value = value
+          .replaceFirst('\uFEFF', '')
+          .trim();
 
       if (!_looksLikeConfig(value)) {
         continue;
@@ -1153,11 +1157,86 @@ class _HomePageState extends State<HomePage>
     return clean;
   }
 
+  List<String> _extractConfigLines(
+    String text,
+  ) {
+    final result = <String>[];
+
+    final lines = text
+        .replaceAll('\r\n', '\n')
+        .replaceAll('\r', '\n')
+        .split('\n');
+
+    for (var line in lines) {
+      var value = line.trim();
+
+      if (value.isEmpty) {
+        continue;
+      }
+
+      value = value.replaceFirst(
+        '\uFEFF',
+        '',
+      );
+
+      // Remove simple surrounding quotes.
+      if (value.length >= 2 &&
+          ((value.startsWith('"') &&
+                  value.endsWith('"')) ||
+              (value.startsWith("'") &&
+                  value.endsWith("'")))) {
+        value = value.substring(
+          1,
+          value.length - 1,
+        );
+      }
+
+      value = value.trim();
+
+      if (_looksLikeConfig(value)) {
+        result.add(value);
+        continue;
+      }
+
+      // Some subscription responses may contain
+      // multiple URI links separated by spaces.
+      final fragments =
+          value.split(RegExp(r'\s+'));
+
+      for (final fragment in fragments) {
+        final candidate = fragment.trim();
+
+        if (_looksLikeConfig(candidate)) {
+          result.add(candidate);
+        }
+      }
+    }
+
+    return result;
+  }
+
+  int _findJsonStart(String value) {
+    final objectIndex = value.indexOf('{');
+    final arrayIndex = value.indexOf('[');
+
+    if (objectIndex < 0) {
+      return arrayIndex;
+    }
+
+    if (arrayIndex < 0) {
+      return objectIndex;
+    }
+
+    return objectIndex < arrayIndex
+        ? objectIndex
+        : arrayIndex;
+  }
+
   bool _looksLikeConfig(
     String value,
   ) {
     final low =
-        value.toLowerCase();
+        value.trim().toLowerCase();
 
     return low.startsWith('vmess://') ||
         low.startsWith('vless://') ||
@@ -1168,34 +1247,43 @@ class _HomePageState extends State<HomePage>
         low.startsWith('hy2://') ||
         low.startsWith('tuic://') ||
         low.startsWith('socks://') ||
-        low.startsWith('socks5://');
+        low.startsWith('socks5://') ||
+        low.startsWith('singbox-json://');
   }
 
   String? _tryDecodeBase64Text(
     String value,
   ) {
     try {
-      var encoded =
-          value.replaceAll(
-        RegExp(r'\s+'),
-        '',
-      );
+      var encoded = value
+          .replaceAll(
+            RegExp(r'\s+'),
+            '',
+          )
+          .trim();
+
+      if (encoded.isEmpty) {
+        return null;
+      }
+
+      // Ignore data that obviously isn't Base64.
+      if (!RegExp(
+        r'^[A-Za-z0-9+/_=-]+$',
+      ).hasMatch(encoded)) {
+        return null;
+      }
 
       encoded = encoded
           .replaceAll('-', '+')
           .replaceAll('_', '/');
 
-      encoded +=
-          '=' *
-              ((4 -
-                      encoded.length % 4) %
-                  4);
+      encoded += '=' *
+          ((4 - encoded.length % 4) % 4);
 
       final bytes =
           base64.decode(encoded);
 
-      final text =
-          utf8.decode(
+      final text = utf8.decode(
         bytes,
         allowMalformed: true,
       );
@@ -1217,8 +1305,7 @@ class _HomePageState extends State<HomePage>
   List<String> _decodeJsonSubscription(
     String body,
   ) {
-    final result =
-        <String>[];
+    final result = <String>[];
 
     try {
       final decoded =
@@ -1248,6 +1335,7 @@ class _HomePageState extends State<HomePage>
           result,
         );
       }
+
       return;
     }
 
@@ -1268,9 +1356,13 @@ class _HomePageState extends State<HomePage>
     ];
 
     for (final value in possibleLinks) {
-      if (value is String &&
-          _looksLikeConfig(value.trim())) {
-        result.add(value.trim());
+      if (value is String) {
+        final candidate =
+            value.trim();
+
+        if (_looksLikeConfig(candidate)) {
+          result.add(candidate);
+        }
       }
     }
 
@@ -1278,14 +1370,19 @@ class _HomePageState extends State<HomePage>
     // Common "links" array
     // ------------------------------------------------------------------------
 
-    final links =
-        object['links'];
+    final links = object['links'];
 
     if (links is List) {
       for (final link in links) {
-        if (link is String &&
-            _looksLikeConfig(link.trim())) {
-          result.add(link.trim());
+        if (link is String) {
+          final candidate =
+              link.trim();
+
+          if (_looksLikeConfig(
+              candidate,
+          )) {
+            result.add(candidate);
+          }
         } else {
           _extractJsonConfigs(
             link,
@@ -1303,8 +1400,7 @@ class _HomePageState extends State<HomePage>
         object['outbounds'];
 
     if (outbounds is List) {
-      for (final outbound
-          in outbounds) {
+      for (final outbound in outbounds) {
         if (outbound is Map) {
           final converted =
               _singboxOutboundToServer(
@@ -1314,9 +1410,7 @@ class _HomePageState extends State<HomePage>
           );
 
           if (converted != null) {
-            result.add(
-              converted,
-            );
+            result.add(converted);
           }
         }
       }
@@ -1326,8 +1420,7 @@ class _HomePageState extends State<HomePage>
     // Generic recursive JSON search
     // ------------------------------------------------------------------------
 
-    for (final value
-        in object.values) {
+    for (final value in object.values) {
       if (value is Map ||
           value is List) {
         _extractJsonConfigs(
@@ -1348,10 +1441,9 @@ class _HomePageState extends State<HomePage>
     final host =
         '${outbound['server'] ?? ''}';
 
-    final port =
-        _toInt(
-          outbound['server_port'],
-        );
+    final port = _toInt(
+      outbound['server_port'],
+    );
 
     if (host.isEmpty ||
         port <= 0) {
@@ -1372,8 +1464,6 @@ class _HomePageState extends State<HomePage>
       return null;
     }
 
-    // We already have the native sing-box object.
-    // Encode it using a private marker that parseServer can understand.
     final copy =
         Map<String, dynamic>.from(
       outbound,
@@ -1405,8 +1495,7 @@ class _HomePageState extends State<HomePage>
         );
       }
 
-      final uri =
-          Uri.parse(raw);
+      final uri = Uri.parse(raw);
 
       final scheme =
           uri.scheme.toLowerCase();
@@ -1482,10 +1571,9 @@ class _HomePageState extends State<HomePage>
       final host =
           '${map['server'] ?? ''}';
 
-      final port =
-          _toInt(
-            map['server_port'],
-          );
+      final port = _toInt(
+        map['server_port'],
+      );
 
       final type =
           '${map['type'] ?? ''}'
@@ -1502,10 +1590,9 @@ class _HomePageState extends State<HomePage>
 
       return Server(
         raw: raw,
-        name:
-            tag.isNotEmpty
-                ? tag
-                : '$type $host',
+        name: tag.isNotEmpty
+            ? tag
+            : '$type $host',
         type: type,
         host: host,
         port: port,
@@ -1540,14 +1627,10 @@ class _HomePageState extends State<HomePage>
           .replaceAll('-', '+')
           .replaceAll('_', '/');
 
-      encoded +=
-          '=' *
-              ((4 -
-                      encoded.length % 4) %
-                  4);
+      encoded += '=' *
+          ((4 - encoded.length % 4) % 4);
 
-      final decoded =
-          utf8.decode(
+      final decoded = utf8.decode(
         base64.decode(encoded),
         allowMalformed: true,
       );
@@ -1633,8 +1716,7 @@ class _HomePageState extends State<HomePage>
   Server? _parseVless(
     String raw,
   ) {
-    final uri =
-        Uri.parse(raw);
+    final uri = Uri.parse(raw);
 
     if (uri.host.isEmpty ||
         !uri.hasPort ||
@@ -1642,13 +1724,11 @@ class _HomePageState extends State<HomePage>
       return null;
     }
 
-    final outbound =
-        vless(uri);
+    final outbound = vless(uri);
 
     return Server(
       raw: raw,
-      name:
-          _uriName(
+      name: _uriName(
         uri,
         'VLESS',
       ),
@@ -1662,8 +1742,7 @@ class _HomePageState extends State<HomePage>
   Map<String, dynamic> vless(
     Uri uri,
   ) {
-    final p =
-        uri.queryParameters;
+    final p = uri.queryParameters;
 
     final outbound =
         <String, dynamic>{
@@ -1674,8 +1753,7 @@ class _HomePageState extends State<HomePage>
       'uuid': uri.userInfo,
     };
 
-    final flow =
-        p['flow'] ?? '';
+    final flow = p['flow'] ?? '';
 
     if (flow.isNotEmpty) {
       outbound['flow'] = flow;
@@ -1696,8 +1774,7 @@ class _HomePageState extends State<HomePage>
                 uri.host,
       };
 
-      final fp =
-          p['fp'] ?? '';
+      final fp = p['fp'] ?? '';
 
       if (fp.isNotEmpty) {
         tls['utls'] = {
@@ -1739,8 +1816,7 @@ class _HomePageState extends State<HomePage>
   Server? _parseTrojan(
     String raw,
   ) {
-    final uri =
-        Uri.parse(raw);
+    final uri = Uri.parse(raw);
 
     if (uri.host.isEmpty ||
         !uri.hasPort ||
@@ -1748,13 +1824,11 @@ class _HomePageState extends State<HomePage>
       return null;
     }
 
-    final outbound =
-        trojan(uri);
+    final outbound = trojan(uri);
 
     return Server(
       raw: raw,
-      name:
-          _uriName(
+      name: _uriName(
         uri,
         'TROJAN',
       ),
@@ -1768,8 +1842,7 @@ class _HomePageState extends State<HomePage>
   Map<String, dynamic> trojan(
     Uri uri,
   ) {
-    final p =
-        uri.queryParameters;
+    final p = uri.queryParameters;
 
     final outbound =
         <String, dynamic>{
@@ -1812,8 +1885,7 @@ class _HomePageState extends State<HomePage>
   Server? _parseShadowsocks(
     String raw,
   ) {
-    final uri =
-        Uri.parse(raw);
+    final uri = Uri.parse(raw);
 
     if (uri.host.isEmpty ||
         !uri.hasPort) {
@@ -1832,8 +1904,7 @@ class _HomePageState extends State<HomePage>
 
     return Server(
       raw: raw,
-      name:
-          _uriName(
+      name: _uriName(
         uri,
         'SS',
       ),
@@ -1850,8 +1921,7 @@ class _HomePageState extends State<HomePage>
     String raw,
   ) {
     try {
-      var user =
-          uri.userInfo;
+      var user = uri.userInfo;
 
       // ss://BASE64@host:port
       if (user.isEmpty) {
@@ -1870,12 +1940,10 @@ class _HomePageState extends State<HomePage>
             .replaceAll('-', '+')
             .replaceAll('_', '/');
 
-        encoded +=
-            '=' *
-                ((4 -
-                        encoded.length %
-                            4) %
-                    4);
+        encoded += '=' *
+            ((4 -
+                    encoded.length % 4) %
+                4);
 
         user = utf8.decode(
           base64.decode(encoded),
@@ -1925,8 +1993,7 @@ class _HomePageState extends State<HomePage>
   Server? _parseHysteria2(
     String raw,
   ) {
-    final uri =
-        Uri.parse(raw);
+    final uri = Uri.parse(raw);
 
     if (uri.host.isEmpty ||
         !uri.hasPort ||
@@ -1936,24 +2003,21 @@ class _HomePageState extends State<HomePage>
 
     return Server(
       raw: raw,
-      name:
-          _uriName(
+      name: _uriName(
         uri,
         'HYSTERIA2',
       ),
       type: 'HYSTERIA2',
       host: uri.host,
       port: uri.port,
-      outbound:
-          hysteria2(uri),
+      outbound: hysteria2(uri),
     );
   }
 
   Map<String, dynamic> hysteria2(
     Uri uri,
   ) {
-    final p =
-        uri.queryParameters;
+    final p = uri.queryParameters;
 
     final outbound =
         <String, dynamic>{
@@ -1987,8 +2051,7 @@ class _HomePageState extends State<HomePage>
   Server? _parseTuic(
     String raw,
   ) {
-    final uri =
-        Uri.parse(raw);
+    final uri = Uri.parse(raw);
 
     if (uri.host.isEmpty ||
         !uri.hasPort ||
@@ -1998,24 +2061,21 @@ class _HomePageState extends State<HomePage>
 
     return Server(
       raw: raw,
-      name:
-          _uriName(
+      name: _uriName(
         uri,
         'TUIC',
       ),
       type: 'TUIC',
       host: uri.host,
       port: uri.port,
-      outbound:
-          tuic(uri),
+      outbound: tuic(uri),
     );
   }
 
   Map<String, dynamic> tuic(
     Uri uri,
   ) {
-    final p =
-        uri.queryParameters;
+    final p = uri.queryParameters;
 
     final outbound =
         <String, dynamic>{
@@ -2032,8 +2092,7 @@ class _HomePageState extends State<HomePage>
       'udp_relay_mode':
           p['udp_relay_mode'] ??
               'native',
-      'zero_rtt_handshake':
-          false,
+      'zero_rtt_handshake': false,
       'tls': {
         'enabled': true,
         'server_name':
@@ -2059,8 +2118,7 @@ class _HomePageState extends State<HomePage>
   Server? _parseSocks(
     String raw,
   ) {
-    final uri =
-        Uri.parse(raw);
+    final uri = Uri.parse(raw);
 
     if (uri.host.isEmpty ||
         !uri.hasPort) {
@@ -2100,8 +2158,7 @@ class _HomePageState extends State<HomePage>
 
     return Server(
       raw: raw,
-      name:
-          _uriName(
+      name: _uriName(
         uri,
         'SOCKS',
       ),
@@ -2122,8 +2179,7 @@ class _HomePageState extends State<HomePage>
     String path,
     String host,
   ) {
-    final n =
-        network.toLowerCase();
+    final n = network.toLowerCase();
 
     if (n == 'ws' ||
         n == 'websocket') {
@@ -2330,12 +2386,11 @@ class _HomePageState extends State<HomePage>
   }
 
   Server? fastest() {
-    final good =
-        servers
-            .where(
-              (s) => s.ping != null,
-            )
-            .toList();
+    final good = servers
+        .where(
+          (s) => s.ping != null,
+        )
+        .toList();
 
     if (good.isEmpty) {
       return null;
@@ -2414,8 +2469,7 @@ class _HomePageState extends State<HomePage>
       silent: true,
     );
 
-    final best =
-        fastest();
+    final best = fastest();
 
     if (mounted) {
       setState(() {
@@ -2466,8 +2520,7 @@ class _HomePageState extends State<HomePage>
       if (selectionMode ==
               ServerSelectionMode.manual &&
           selectedServer != null) {
-        selected =
-            selectedServer;
+        selected = selectedServer;
       } else {
         setState(() {
           stateText =
@@ -2478,11 +2531,9 @@ class _HomePageState extends State<HomePage>
           silent: true,
         );
 
-        selected =
-            fastest();
+        selected = fastest();
 
-        selected ??=
-            servers.first;
+        selected ??= servers.first;
 
         if (mounted) {
           setState(() {
@@ -2954,8 +3005,8 @@ class _HomePageState extends State<HomePage>
       padding:
           padding ??
               const EdgeInsets.all(
-                16,
-              ),
+            16,
+          ),
       decoration:
           BoxDecoration(
         color:
@@ -3531,7 +3582,8 @@ class _HomePageState extends State<HomePage>
                                     : 'اتصال',
                                 style:
                                     const TextStyle(
-                                  fontSize: 18,
+                                  fontSize:
+                                      18,
                                   fontWeight:
                                       FontWeight
                                           .w800,
@@ -3548,7 +3600,8 @@ class _HomePageState extends State<HomePage>
                                     const TextStyle(
                                   color:
                                       Colors.white54,
-                                  fontSize: 11,
+                                  fontSize:
+                                      11,
                                 ),
                               ),
                             ],
@@ -3910,8 +3963,7 @@ class _HomePageState extends State<HomePage>
                     testing ||
                             servers.isEmpty
                         ? null
-                        : () =>
-                            testAll(),
+                        : () => testAll(),
                 icon:
                     testing
                         ? const SizedBox(
@@ -3938,7 +3990,8 @@ class _HomePageState extends State<HomePage>
               width: 10,
             ),
             Expanded(
-              child: OutlinedButton.icon(
+              child:
+                  OutlinedButton.icon(
                 onPressed:
                     loading
                         ? null
@@ -4000,13 +4053,8 @@ class _HomePageState extends State<HomePage>
             ),
           ),
 
-        ...servers.asMap().entries.map(
-          (entry) {
-            final index =
-                entry.key;
-            final server =
-                entry.value;
-
+        ...servers.map(
+          (server) {
             final isSelected =
                 selectedServer?.raw ==
                     server.raw;
@@ -4529,11 +4577,14 @@ class _HomePageState extends State<HomePage>
     final expired =
         expireAt != null &&
             expireAt! > 0 &&
-            DateTime.fromMillisecondsSinceEpoch(
-              expireAt! > 20000000000
+            DateTime
+                .fromMillisecondsSinceEpoch(
+              expireAt! >
+                      20000000000
                   ? expireAt!
                   : expireAt! * 1000,
-            ).isBefore(
+            )
+                .isBefore(
               DateTime.now(),
             );
 
