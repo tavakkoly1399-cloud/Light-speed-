@@ -8,12 +8,17 @@ import 'package:flutter_singbox_client/flutter_singbox_client.dart';
 import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
 
-void main() {
+final vpn = SingboxClient();
+
+Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
+
+  try {
+    await vpn.initialize();
+  } catch (_) {}
+
   runApp(const LightSpeedApp());
 }
-
-final vpn = SingboxClient();
 
 class LightSpeedApp extends StatelessWidget {
   const LightSpeedApp({super.key});
@@ -26,17 +31,10 @@ class LightSpeedApp extends StatelessWidget {
       theme: ThemeData(
         brightness: Brightness.dark,
         useMaterial3: true,
-        scaffoldBackgroundColor: const Color(0xFF050A12),
+        scaffoldBackgroundColor: const Color(0xFF07101F),
         colorScheme: ColorScheme.fromSeed(
-          seedColor: const Color(0xFF00D4FF),
+          seedColor: const Color(0xFF00E5FF),
           brightness: Brightness.dark,
-        ),
-        cardTheme: CardThemeData(
-          color: const Color(0xFF0B1422),
-          elevation: 0,
-          shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(22),
-          ),
         ),
       ),
       home: const HomePage(),
@@ -45,6 +43,15 @@ class LightSpeedApp extends StatelessWidget {
 }
 
 class Server {
+  Server({
+    required this.raw,
+    required this.name,
+    required this.type,
+    required this.host,
+    required this.port,
+    required this.outbound,
+  });
+
   final String raw;
   final String name;
   final String type;
@@ -53,54 +60,6 @@ class Server {
   final Map<String, dynamic> outbound;
 
   int? ping;
-
-  Server({
-    required this.raw,
-    required this.name,
-    required this.type,
-    required this.host,
-    required this.port,
-    required this.outbound,
-    this.ping,
-  });
-}
-
-class SubscriptionInfo {
-  final int? upload;
-  final int? download;
-  final int? total;
-  final int? expire;
-
-  const SubscriptionInfo({
-    this.upload,
-    this.download,
-    this.total,
-    this.expire,
-  });
-
-  bool get hasTraffic =>
-      upload != null || download != null || total != null;
-
-  int? get used {
-    if (upload == null && download == null) {
-      return null;
-    }
-
-    return (upload ?? 0) + (download ?? 0);
-  }
-
-  int? get remaining {
-    if (total == null || used == null) {
-      return null;
-    }
-
-    if (total! <= 0) {
-      return null;
-    }
-
-    final value = total! - used!;
-    return value < 0 ? 0 : value;
-  }
 }
 
 class HomePage extends StatefulWidget {
@@ -110,20 +69,13 @@ class HomePage extends StatefulWidget {
   State<HomePage> createState() => _HomePageState();
 }
 
-class _HomePageState extends State<HomePage>
-    with WidgetsBindingObserver {
-  final TextEditingController urlController = TextEditingController();
+class _HomePageState extends State<HomePage> {
+  final url = TextEditingController();
+  final servers = <Server>[];
 
-  SharedPreferences? prefs;
-
-  List<Server> servers = [];
-
-  StreamSubscription? trafficSub;
   StreamSubscription? stateSub;
-  StreamSubscription? faultSub;
-
-  Timer? refreshTimer;
-  Timer? connectionTimer;
+  StreamSubscription? trafficSub;
+  Timer? timer;
 
   int page = 0;
 
@@ -132,1749 +84,781 @@ class _HomePageState extends State<HomePage>
   bool connected = false;
   bool connecting = false;
 
-  bool autoSelect = true;
-
   String stateText = 'آماده اتصال';
-  String lastFault = '';
 
-  int selectedServer = 0;
+  String download = '0 Mbps';
+  String upload = '0 Mbps';
 
-  int uploadSpeed = 0;
-  int downloadSpeed = 0;
+  int downloadTotalBytes = 0;
+  int uploadTotalBytes = 0;
 
-  int sessionUpload = 0;
-  int sessionDownload = 0;
-
-  DateTime? connectedAt;
-
-  SubscriptionInfo subscription = const SubscriptionInfo();
-
-  String subscriptionTitle = 'Subscription';
-  String? profileUpdateInterval;
-
-  String? supportUrl;
-  String? webPageUrl;
+  int? totalBytes;
+  int? usedBytes;
+  int? uploadBytes;
+  int? downloadBytes;
+  int? expireAt;
 
   @override
   void initState() {
     super.initState();
 
-    WidgetsBinding.instance.addObserver(this);
-
-    _initialize();
-  }
-
-  Future<void> _initialize() async {
-    try {
-      await vpn.initialize();
-    } catch (_) {}
-
-    prefs = await SharedPreferences.getInstance();
-
-    final savedUrl = prefs?.getString('subscription_url');
-
-    if (savedUrl != null && savedUrl.trim().isNotEmpty) {
-      urlController.text = savedUrl;
-    }
-
-    await _restoreSavedData();
-
-    trafficSub = vpn.trafficStatsStream.listen((stats) {
+    stateSub = vpn.serviceStateStream.listen((s) {
       if (!mounted) return;
 
-      setState(() {
-        uploadSpeed = stats.uplinkBps;
-        downloadSpeed = stats.downlinkBps;
-        sessionUpload = stats.uplinkTotalBytes;
-        sessionDownload = stats.downlinkTotalBytes;
-      });
-    });
-
-    stateSub = vpn.serviceStateStream.listen((state) {
-      if (!mounted) return;
-
-      final value = state.toString().toLowerCase();
+      final text = s.toString();
+      final low = text.toLowerCase();
 
       setState(() {
-        connected = value.contains('started');
-        connecting = value.contains('starting') ||
-            value.contains('stopping');
+        stateText = text;
 
-        if (connected) {
-          stateText = 'متصل';
-        } else if (value.contains('starting')) {
-          stateText = 'در حال اتصال...';
-        } else if (value.contains('stopping')) {
-          stateText = 'در حال قطع اتصال...';
-        } else {
-          stateText = 'قطع';
+        if (low.contains('running') ||
+            low.contains('connected') ||
+            low.contains('started')) {
+          connected = true;
+        }
+
+        if (low.contains('stopped') ||
+            low.contains('disconnected')) {
+          connected = false;
         }
       });
     });
 
-    faultSub = vpn.faultStream.listen((error) {
+    trafficSub = vpn.trafficStatsStream.listen((s) {
       if (!mounted) return;
 
-      setState(() {
-        lastFault = error.toString();
-      });
+      dynamic x = s;
 
-      _showMessage('خطای VPN: $error');
+      try {
+        setState(() {
+          download = speed(x.downlinkBps);
+          upload = speed(x.uplinkBps);
+
+          try {
+            final d = x.downlinkTotalBytes;
+
+            if (d is num) {
+              downloadTotalBytes = d.toInt();
+            }
+          } catch (_) {}
+
+          try {
+            final u = x.uplinkTotalBytes;
+
+            if (u is num) {
+              uploadTotalBytes = u.toInt();
+            }
+          } catch (_) {}
+        });
+      } catch (_) {}
     });
 
-    if (urlController.text.trim().isNotEmpty) {
-      await Future.delayed(const Duration(milliseconds: 500));
-      await loadSubscription(silent: true);
-    }
-
-    _startRefreshTimer();
-  }
-
-  @override
-  void didChangeAppLifecycleState(AppLifecycleState state) {
-    if (state == AppLifecycleState.resumed) {
-      if (!connected &&
-          urlController.text.trim().isNotEmpty) {
-        loadSubscription(silent: true);
-      }
-    }
-  }
-
-  void _startRefreshTimer() {
-    refreshTimer?.cancel();
-
-    refreshTimer = Timer.periodic(
+    timer = Timer.periodic(
       const Duration(minutes: 15),
       (_) {
-        if (!connected &&
-            urlController.text.trim().isNotEmpty) {
+        if (!connected && url.text.trim().isNotEmpty) {
           loadSubscription(silent: true);
         }
       },
     );
+
+    loadSaved();
   }
 
-  @override
-  void dispose() {
-    WidgetsBinding.instance.removeObserver(this);
+  Future<void> loadSaved() async {
+    final p = await SharedPreferences.getInstance();
 
-    refreshTimer?.cancel();
-    connectionTimer?.cancel();
+    final saved = p.getString('subscription_url');
 
-    trafficSub?.cancel();
-    stateSub?.cancel();
-    faultSub?.cancel();
-
-    urlController.dispose();
-
-    super.dispose();
-  }
-
-  // ---------------------------------------------------------------------------
-  // SUBSCRIPTION
-  // ---------------------------------------------------------------------------
-
-  Future<void> _restoreSavedData() async {
-    final savedServers = prefs?.getString('servers_json');
-
-    if (savedServers == null || savedServers.isEmpty) {
+    if (saved == null || saved.trim().isEmpty) {
       return;
     }
 
-    try {
-      final list = jsonDecode(savedServers);
+    url.text = saved;
 
-      if (list is! List) return;
-
-      final restored = <Server>[];
-
-      for (final item in list) {
-        if (item is! Map) continue;
-
-        final outbound = Map<String, dynamic>.from(
-          item['outbound'] is Map
-              ? item['outbound']
-              : <String, dynamic>{},
-        );
-
-        restored.add(
-          Server(
-            raw: item['raw']?.toString() ?? '',
-            name: item['name']?.toString() ?? 'Server',
-            type: item['type']?.toString() ?? '',
-            host: item['host']?.toString() ?? '',
-            port: int.tryParse(
-                  item['port']?.toString() ?? '',
-                ) ??
-                443,
-            outbound: outbound,
-            ping: int.tryParse(
-              item['ping']?.toString() ?? '',
-            ),
-          ),
-        );
-      }
-
-      if (!mounted) return;
-
-      setState(() {
-        servers = restored;
-      });
-    } catch (_) {}
+    await loadSubscription(silent: true);
   }
 
-  Future<void> _saveServers() async {
-    final data = servers.map((server) {
-      return {
-        'raw': server.raw,
-        'name': server.name,
-        'type': server.type,
-        'host': server.host,
-        'port': server.port,
-        'outbound': server.outbound,
-        'ping': server.ping,
-      };
-    }).toList();
-
-    await prefs?.setString(
-      'servers_json',
-      jsonEncode(data),
-    );
-  }
-
-  String? _header(
+  String? responseHeader(
     Map<String, String> headers,
-    String name,
+    String wanted,
   ) {
-    for (final entry in headers.entries) {
-      if (entry.key.trim().toLowerCase() ==
-          name.trim().toLowerCase()) {
-        return entry.value;
+    final target = wanted.toLowerCase();
+
+    for (final e in headers.entries) {
+      if (e.key.toLowerCase() == target) {
+        return e.value;
       }
     }
 
     return null;
   }
 
-  int? _parseInt(dynamic value) {
-    if (value == null) return null;
-
-    if (value is int) return value;
-
-    final text = value.toString().trim();
-
-    if (text.isEmpty) return null;
-
-    return int.tryParse(text);
-  }
-
-  SubscriptionInfo _parseSubscriptionUserInfo(
-    String? raw,
-  ) {
+  void _readUserInfo(String? raw) {
     if (raw == null || raw.trim().isEmpty) {
-      return const SubscriptionInfo();
+      return;
     }
 
-    int? upload;
-    int? download;
-    int? total;
-    int? expire;
+    final values = <String, int>{};
 
     for (final item in raw.split(';')) {
-      final part = item.trim();
+      final separator = item.indexOf('=');
 
-      if (part.isEmpty) continue;
+      if (separator <= 0) {
+        continue;
+      }
 
-      final separator = part.indexOf('=');
-
-      if (separator <= 0) continue;
-
-      final key = part
+      final key = item
           .substring(0, separator)
           .trim()
           .toLowerCase();
 
-      final value = part
-          .substring(separator + 1)
-          .trim();
+      final value = int.tryParse(
+        item.substring(separator + 1).trim(),
+      );
 
-      final number = int.tryParse(value);
-
-      if (number == null) continue;
+      if (value == null) {
+        continue;
+      }
 
       switch (key) {
         case 'upload':
-          upload = number;
+          values['upload'] = value;
           break;
 
         case 'download':
-          download = number;
+          values['download'] = value;
           break;
 
         case 'total':
         case 'transfer_enable':
-        case 'transfer':
-          total = number;
+        case 'transfer-enabled':
+          values['total'] = value;
           break;
 
         case 'expire':
         case 'expired_at':
-        case 'expires':
-          expire = number;
+        case 'expired':
+          values['expire'] = value;
           break;
       }
     }
 
-    return SubscriptionInfo(
-      upload: upload,
-      download: download,
-      total: total,
-      expire: expire,
-    );
+    if (!mounted) return;
+
+    setState(() {
+      if (values.containsKey('total')) {
+        totalBytes = values['total'];
+      }
+
+      if (values.containsKey('upload')) {
+        uploadBytes = values['upload'];
+      }
+
+      if (values.containsKey('download')) {
+        downloadBytes = values['download'];
+      }
+
+      if (values.containsKey('upload') ||
+          values.containsKey('download')) {
+        usedBytes =
+            (uploadBytes ?? 0) +
+            (downloadBytes ?? 0);
+      }
+
+      if (values.containsKey('expire')) {
+        expireAt = values['expire'];
+      }
+    });
   }
 
   Future<void> loadSubscription({
     bool silent = false,
   }) async {
-    final urlText = urlController.text.trim();
+    final subscriptionUrl = url.text.trim();
 
-    if (urlText.isEmpty) {
-      if (!silent) {
-        _showMessage('لینک Subscription را وارد کن.');
+    if (subscriptionUrl.isEmpty) {
+      if (!silent && mounted) {
+        setState(() {
+          stateText = 'Subscription URL را وارد کن';
+        });
       }
 
       return;
     }
 
-    Uri uri;
-
-    try {
-      uri = Uri.parse(urlText);
-
-      if (!uri.hasScheme ||
-          (uri.scheme != 'https' &&
-              uri.scheme != 'http')) {
-        throw const FormatException();
-      }
-    } catch (_) {
-      if (!silent) {
-        _showMessage('لینک Subscription معتبر نیست.');
-      }
-
-      return;
-    }
-
-    if (mounted) {
+    if (!silent && mounted) {
       setState(() {
         loading = true;
         stateText = 'در حال دریافت Subscription...';
-        lastFault = '';
+      });
+    } else if (mounted) {
+      setState(() {
+        loading = true;
       });
     }
 
     try {
-      final response = await http
-          .get(
-            uri,
-            headers: {
-              'User-Agent':
-                  'Light-speed/1.0 (Flutter; Android)',
-              'Accept':
-                  'application/json, text/plain, */*',
-              'Cache-Control': 'no-cache',
-              'Pragma': 'no-cache',
-            },
-          )
-          .timeout(
-            const Duration(seconds: 60),
-          );
+      final response = await http.get(
+        Uri.parse(subscriptionUrl),
+        headers: const {
+          'User-Agent': 'LightSpeed/3.0',
+          'Accept': '*/*',
+          'Cache-Control': 'no-cache',
+          'Pragma': 'no-cache',
+        },
+      ).timeout(
+        const Duration(seconds: 60),
+      );
 
       if (response.statusCode < 200 ||
           response.statusCode >= 300) {
-        throw HttpException(
+        throw Exception(
           'HTTP ${response.statusCode}',
         );
       }
 
-      // -------------------------------------------------------
-      // 1. READ STANDARD SUBSCRIPTION HEADERS
-      // -------------------------------------------------------
-
-      final userInfoHeader = _header(
-        response.headers,
-        'subscription-userinfo',
+      final body = utf8.decode(
+        response.bodyBytes,
+        allowMalformed: true,
       );
 
-      final profileTitleHeader = _header(
-        response.headers,
-        'profile-title',
+      _readUserInfo(
+        responseHeader(
+          response.headers,
+          'subscription-userinfo',
+        ),
       );
 
-      final updateIntervalHeader = _header(
-        response.headers,
-        'profile-update-interval',
-      );
+      final decodedLines = decodeSubscription(body);
 
-      final supportHeader = _header(
-        response.headers,
-        'support-url',
-      );
+      final result = <Server>[];
 
-      final webPageHeader = _header(
-        response.headers,
-        'profile-web-page-url',
-      );
+      for (final line in decodedLines) {
+        final server = parseServer(line);
 
-      final contentType = _header(
-        response.headers,
-        'content-type',
-      );
-
-      final contentDisposition = _header(
-        response.headers,
-        'content-disposition',
-      );
-
-      final parsedInfo =
-          _parseSubscriptionUserInfo(
-        userInfoHeader,
-      );
-
-      // -------------------------------------------------------
-      // 2. READ PROFILE TITLE
-      // -------------------------------------------------------
-
-      String newTitle = subscriptionTitle;
-
-      if (profileTitleHeader != null &&
-          profileTitleHeader.trim().isNotEmpty) {
-        newTitle = _decodeProfileTitle(
-          profileTitleHeader,
-        );
-      } else if (contentDisposition != null) {
-        final fallback =
-            _filenameFromContentDisposition(
-          contentDisposition,
-        );
-
-        if (fallback != null &&
-            fallback.isNotEmpty) {
-          newTitle = fallback;
+        if (server != null) {
+          result.add(server);
         }
       }
 
-      // -------------------------------------------------------
-      // 3. BODY
-      // -------------------------------------------------------
-
-      final body = response.body.trim();
-
-      if (body.isEmpty) {
-        throw const FormatException(
-          'Subscription body is empty',
+      if (result.isEmpty) {
+        throw Exception(
+          'هیچ کانفیگ قابل شناسایی پیدا نشد',
         );
       }
 
-      final parsedServers = _parseSubscriptionBody(
-        body,
-        contentType: contentType,
+      final p = await SharedPreferences.getInstance();
+
+      await p.setString(
+        'subscription_url',
+        subscriptionUrl,
       );
-
-      if (parsedServers.isEmpty) {
-        throw const FormatException(
-          'هیچ کانفیگ معتبری داخل Subscription پیدا نشد.',
-        );
-      }
-
-      // -------------------------------------------------------
-      // 4. UPDATE STATE ONLY AFTER SUCCESS
-      // -------------------------------------------------------
 
       if (!mounted) return;
 
       setState(() {
-        servers = parsedServers;
-
-        subscription = parsedInfo;
-
-        subscriptionTitle = newTitle;
-
-        profileUpdateInterval =
-            updateIntervalHeader;
-
-        supportUrl = supportHeader;
-        webPageUrl = webPageHeader;
-
-        selectedServer = min(
-          selectedServer,
-          max(0, servers.length - 1),
-        );
+        servers
+          ..clear()
+          ..addAll(result);
 
         loading = false;
+
         stateText =
             '${servers.length} سرور دریافت شد';
       });
 
-      await prefs?.setString(
-        'subscription_url',
-        urlText,
-      );
-
-      await _saveServers();
-
-      await testAll();
-
-      if (!mounted) return;
-
-      setState(() {
-        stateText =
-            '${servers.length} سرور آماده اتصال';
-        loading = false;
-      });
-
-      if (!silent) {
-        _showMessage(
-          'Subscription با موفقیت بروزرسانی شد.',
-        );
-      }
-    } on TimeoutException {
-      if (!mounted) return;
-
-      setState(() {
-        loading = false;
-        stateText =
-            'بروزرسانی ناموفق؛ اطلاعات قبلی حفظ شد';
-      });
-
-      if (!silent) {
-        _showMessage(
-          'سرور Subscription در ۶۰ ثانیه پاسخ نداد. اطلاعات قبلی حفظ شد.',
-        );
-      }
+      await testAll(silent: true);
     } catch (e) {
       if (!mounted) return;
 
       setState(() {
         loading = false;
-        stateText =
-            servers.isNotEmpty
-                ? 'بروزرسانی ناموفق؛ اطلاعات قبلی حفظ شد'
-                : 'خطا در دریافت Subscription';
-        lastFault = e.toString();
+        stateText = 'خطا در دریافت Subscription';
       });
 
       if (!silent) {
-        _showMessage(
-          'دریافت Subscription ناموفق بود:\n$e',
+        snack(
+          'دریافت Subscription ناموفق بود: $e',
         );
       }
     }
   }
 
-  String _decodeProfileTitle(String value) {
-    final text = value.trim();
-
-    if (text.toLowerCase().startsWith('base64:')) {
-      final encoded =
-          text.substring('base64:'.length);
-
-      try {
-        return utf8.decode(
-          base64Decode(
-            base64.normalize(encoded),
-          ),
-        );
-      } catch (_) {
-        return text;
-      }
-    }
-
-    return text;
-  }
-
-  String? _filenameFromContentDisposition(
-    String value,
-  ) {
-    final regex = RegExp(
-      r'filename\*?=(?:UTF-8\'\')?"?([^";]+)"?',
-      caseSensitive: false,
-    );
-
-    final match = regex.firstMatch(value);
-
-    if (match == null) return null;
-
-    return Uri.decodeComponent(
-      match.group(1)!.trim(),
-    );
-  }
-
-  // ---------------------------------------------------------------------------
-  // SUBSCRIPTION BODY PARSER
-  // ---------------------------------------------------------------------------
-
-  List<Server> _parseSubscriptionBody(
-    String body, {
-    String? contentType,
-  }) {
-    final result = <Server>[];
-
-    final type =
-        (contentType ?? '').toLowerCase();
-
-    // JSON subscription
-    if (type.contains('application/json') ||
-        body.startsWith('{') ||
-        body.startsWith('[')) {
-      final jsonServers =
-          _parseJsonSubscription(body);
-
-      if (jsonServers.isNotEmpty) {
-        return jsonServers;
-      }
-    }
-
-    // Raw body
-    final lines = body
+  List<String> decodeSubscription(String body) {
+    final direct = body
         .replaceAll('\r', '')
         .split('\n')
-        .map((e) => e.trim())
-        .where((e) => e.isNotEmpty)
+        .map((x) => x.trim())
+        .where(
+          (x) => x.contains('://'),
+        )
         .toList();
 
-    // First try direct links.
-    for (final line in lines) {
-      final decoded =
-          _decodePossibleBase64(line);
-
-      if (decoded != null &&
-          decoded != line &&
-          decoded.contains('\n')) {
-        for (final item
-            in decoded.split('\n')) {
-          final parsed = _parseSingleServer(
-            item.trim(),
-          );
-
-          if (parsed != null) {
-            result.add(parsed);
-          }
-        }
-      }
+    if (direct.isNotEmpty) {
+      return direct;
     }
 
-    if (result.isNotEmpty) {
-      return _deduplicateServers(result);
-    }
-
-    // Direct links.
-    for (final line in lines) {
-      final parsed = _parseSingleServer(line);
-
-      if (parsed != null) {
-        result.add(parsed);
-      }
-    }
-
-    if (result.isNotEmpty) {
-      return _deduplicateServers(result);
-    }
-
-    // Entire body may be base64.
-    final decodedBody =
-        _decodePossibleBase64(body);
-
-    if (decodedBody != null &&
-        decodedBody != body) {
-      for (final line
-          in decodedBody
-              .replaceAll('\r', '')
-              .split('\n')) {
-        final parsed =
-            _parseSingleServer(line.trim());
-
-        if (parsed != null) {
-          result.add(parsed);
-        }
-      }
-    }
-
-    return _deduplicateServers(result);
-  }
-
-  List<Server> _parseJsonSubscription(
-    String body,
-  ) {
     try {
-      final decoded = jsonDecode(body);
+      var encoded = body.trim();
 
-      final result = <Server>[];
+      encoded = encoded.replaceAll(
+        RegExp(r'\s+'),
+        '',
+      );
 
-      if (decoded is List) {
-        for (final item in decoded) {
-          final server =
-              _parseJsonServer(item);
+      encoded = encoded
+          .replaceAll('-', '+')
+          .replaceAll('_', '/');
 
-          if (server != null) {
-            result.add(server);
-          }
-        }
-      } else if (decoded is Map) {
-        final map =
-            Map<String, dynamic>.from(decoded);
+      encoded += '=' *
+          ((4 - encoded.length % 4) % 4);
 
-        final candidates = [
-          map['servers'],
-          map['outbounds'],
-          map['proxies'],
-          map['configs'],
-          map['data'],
-        ];
+      final decoded = utf8.decode(
+        base64.decode(encoded),
+        allowMalformed: true,
+      );
 
-        for (final candidate in candidates) {
-          if (candidate is List) {
-            for (final item in candidate) {
-              final server =
-                  _parseJsonServer(item);
-
-              if (server != null) {
-                result.add(server);
-              }
-            }
-          }
-        }
-
-        if (result.isEmpty) {
-          final server =
-              _parseJsonServer(map);
-
-          if (server != null) {
-            result.add(server);
-          }
-        }
-      }
-
-      return _deduplicateServers(result);
+      return decoded
+          .replaceAll('\r', '')
+          .split('\n')
+          .map((x) => x.trim())
+          .where(
+            (x) => x.contains('://'),
+          )
+          .toList();
     } catch (_) {
       return [];
     }
   }
 
-  Server? _parseJsonServer(
-    dynamic item,
-  ) {
-    if (item is! Map) return null;
+  Server? parseServer(String raw) {
+    try {
+      final u = Uri.parse(raw);
+      final scheme = u.scheme.toLowerCase();
 
-    final map =
-        Map<String, dynamic>.from(item);
+      if (scheme == 'vmess') {
+        return parseVmess(raw);
+      }
 
-    final protocol = (
-      map['type'] ??
-      map['protocol'] ??
-      map['scheme']
-    )
-        ?.toString()
-        .toLowerCase();
+      if (![
+        'vless',
+        'trojan',
+        'ss',
+        'hysteria2',
+        'hy2',
+        'tuic',
+      ].contains(scheme)) {
+        return null;
+      }
 
-    if (protocol == null) return null;
+      if (u.host.isEmpty || !u.hasPort) {
+        return null;
+      }
 
-    final host = (
-      map['server'] ??
-      map['address'] ??
-      map['host']
-    )?.toString();
+      final name = Uri.decodeComponent(
+        u.fragment.isEmpty
+            ? '${scheme.toUpperCase()} ${u.host}'
+            : u.fragment,
+      );
 
-    final port = _parseInt(
-      map['server_port'] ??
-          map['port'],
-    );
+      late Map<String, dynamic> out;
 
-    if (host == null ||
-        host.isEmpty ||
-        port == null) {
+      if (scheme == 'vless') {
+        out = vless(u);
+      } else if (scheme == 'trojan') {
+        out = trojan(u);
+      } else if (scheme == 'ss') {
+        out = shadowsocks(u, raw) ?? {};
+      } else if (scheme == 'tuic') {
+        out = tuic(u);
+      } else {
+        out = hysteria2(u);
+      }
+
+      if (out.isEmpty) {
+        return null;
+      }
+
+      return Server(
+        raw: raw,
+        name: name,
+        type: scheme.toUpperCase(),
+        host: u.host,
+        port: u.port,
+        outbound: out,
+      );
+    } catch (_) {
       return null;
     }
-
-    final tag =
-        map['tag']?.toString() ??
-            map['name']?.toString() ??
-            map['remarks']?.toString() ??
-            '$protocol $host';
-
-    final outbound =
-        _normalizeJsonOutbound(
-      map,
-      protocol,
-      host,
-      port,
-    );
-
-    if (outbound == null) return null;
-
-    return Server(
-      raw: jsonEncode(map),
-      name: tag,
-      type: protocol,
-      host: host,
-      port: port,
-      outbound: outbound,
-    );
   }
 
-  Map<String, dynamic>? _normalizeJsonOutbound(
-    Map<String, dynamic> map,
-    String protocol,
-    String host,
-    int port,
-  ) {
-    if (protocol == 'vless') {
-      final uuid =
-          map['uuid'] ??
-              map['id'] ??
-              map['password'];
+  Server? parseVmess(String raw) {
+    try {
+      var encoded = raw.substring(
+        raw.indexOf('://') + 3,
+      );
 
-      if (uuid == null) return null;
+      encoded = encoded
+          .replaceAll('-', '+')
+          .replaceAll('_', '/');
 
-      return {
-        'type': 'vless',
-        'tag': 'proxy',
-        'server': host,
-        'server_port': port,
-        'uuid': uuid.toString(),
-        'tls': _tlsFromMap(map),
-        if (map['flow'] != null)
-          'flow': map['flow'],
-        if (map['transport'] is Map)
-          'transport': map['transport'],
-      };
-    }
+      encoded += '=' *
+          ((4 - encoded.length % 4) % 4);
 
-    if (protocol == 'vmess') {
-      final uuid =
-          map['uuid'] ??
-              map['id'];
+      final decoded = utf8.decode(
+        base64.decode(encoded),
+        allowMalformed: true,
+      );
 
-      if (uuid == null) return null;
+      final jsonData = json.decode(decoded);
 
-      return {
+      if (jsonData is! Map) {
+        return null;
+      }
+
+      final m = Map<String, dynamic>.from(
+        jsonData,
+      );
+
+      final host = '${m['add'] ?? ''}';
+
+      final port =
+          int.tryParse(
+            '${m['port'] ?? ''}',
+          ) ??
+          0;
+
+      final uuid = '${m['id'] ?? ''}';
+
+      if (host.isEmpty ||
+          port <= 0 ||
+          uuid.isEmpty) {
+        return null;
+      }
+
+      final out = <String, dynamic>{
         'type': 'vmess',
         'tag': 'proxy',
         'server': host,
         'server_port': port,
-        'uuid': uuid.toString(),
-        'security':
-            map['security'] ??
-                map['cipher'] ??
-                'auto',
-        'tls': _tlsFromMap(map),
-        if (map['transport'] is Map)
-          'transport': map['transport'],
+        'uuid': uuid,
+        'security': '${m['scy'] ?? 'auto'}',
       };
-    }
 
-    if (protocol == 'trojan') {
-      final password =
-          map['password'];
+      final tlsType =
+          '${m['tls'] ?? ''}'.toLowerCase();
 
-      if (password == null) return null;
+      final sni =
+          '${m['sni'] ?? m['host'] ?? ''}';
 
-      return {
-        'type': 'trojan',
-        'tag': 'proxy',
-        'server': host,
-        'server_port': port,
-        'password': password.toString(),
-        'tls': _tlsFromMap(map),
-      };
-    }
+      if (tlsType.isNotEmpty &&
+          tlsType != 'none') {
+        final tls = <String, dynamic>{
+          'enabled': true,
+        };
 
-    if (protocol == 'shadowsocks' ||
-        protocol == 'ss') {
-      final password =
-          map['password'];
+        if (sni.isNotEmpty) {
+          tls['server_name'] = sni;
+        }
 
-      final method =
-          map['method'] ??
-              map['cipher'];
+        final fp = '${m['fp'] ?? ''}';
 
-      if (password == null ||
-          method == null) {
-        return null;
+        if (fp.isNotEmpty) {
+          tls['utls'] = {
+            'enabled': true,
+            'fingerprint': fp,
+          };
+        }
+
+        out['tls'] = tls;
       }
 
-      return {
-        'type': 'shadowsocks',
-        'tag': 'proxy',
-        'server': host,
-        'server_port': port,
-        'method': method.toString(),
-        'password': password.toString(),
-      };
+      addTransport(
+        out,
+        '${m['net'] ?? 'tcp'}',
+        '${m['path'] ?? ''}',
+        '${m['host'] ?? ''}',
+      );
+
+      return Server(
+        raw: raw,
+        name: '${m['ps'] ?? 'VMess'}',
+        type: 'VMESS',
+        host: host,
+        port: port,
+        outbound: out,
+      );
+    } catch (_) {
+      return null;
     }
-
-    if (protocol == 'hysteria2' ||
-        protocol == 'hy2') {
-      final password =
-          map['password'] ??
-              map['auth'];
-
-      if (password == null) return null;
-
-      return {
-        'type': 'hysteria2',
-        'tag': 'proxy',
-        'server': host,
-        'server_port': port,
-        'password': password.toString(),
-        'tls': _tlsFromMap(map),
-      };
-    }
-
-    if (protocol == 'tuic') {
-      final uuid =
-          map['uuid'] ??
-              map['id'];
-
-      final password =
-          map['password'];
-
-      if (uuid == null ||
-          password == null) {
-        return null;
-      }
-
-      return {
-        'type': 'tuic',
-        'tag': 'proxy',
-        'server': host,
-        'server_port': port,
-        'uuid': uuid.toString(),
-        'password': password.toString(),
-        'tls': _tlsFromMap(map),
-      };
-    }
-
-    return null;
   }
 
-  Map<String, dynamic> _tlsFromMap(
-    Map<String, dynamic> map,
-  ) {
-    final tls =
-        map['tls'];
+  Map<String, dynamic> vless(Uri u) {
+    final p = u.queryParameters;
 
-    if (tls is Map) {
-      return Map<String, dynamic>.from(tls);
+    final out = <String, dynamic>{
+      'type': 'vless',
+      'tag': 'proxy',
+      'server': u.host,
+      'server_port': u.port,
+      'uuid': u.userInfo,
+    };
+
+    if ((p['flow'] ?? '').isNotEmpty) {
+      out['flow'] = p['flow'];
     }
 
     final security =
-        map['security']?.toString();
+        (p['security'] ?? '').toLowerCase();
 
     if (security == 'tls' ||
         security == 'reality') {
-      return {
+      final tls = <String, dynamic>{
         'enabled': true,
-        if (map['server_name'] != null)
-          'server_name': map['server_name'],
-        if (map['sni'] != null)
-          'server_name': map['sni'],
-      };
-    }
-
-    return {
-      'enabled': false,
-    };
-  }
-
-  String? _decodePossibleBase64(
-    String input,
-  ) {
-    final value = input.trim();
-
-    if (value.isEmpty) return null;
-
-    if (value.startsWith('vless://') ||
-        value.startsWith('vmess://') ||
-        value.startsWith('trojan://') ||
-        value.startsWith('ss://') ||
-        value.startsWith('hysteria2://') ||
-        value.startsWith('hy2://') ||
-        value.startsWith('tuic://')) {
-      return value;
-    }
-
-    try {
-      final normalized =
-          base64.normalize(
-        value.replaceAll(RegExp(r'\s+'), ''),
-      );
-
-      final bytes =
-          base64Decode(normalized);
-
-      final decoded =
-          utf8.decode(bytes);
-
-      if (_looksLikeConfig(decoded)) {
-        return decoded;
-      }
-    } catch (_) {}
-
-    return value;
-  }
-
-  bool _looksLikeConfig(String text) {
-    return text.contains('vless://') ||
-        text.contains('vmess://') ||
-        text.contains('trojan://') ||
-        text.contains('ss://') ||
-        text.contains('hysteria2://') ||
-        text.contains('hy2://') ||
-        text.contains('tuic://');
-  }
-
-  // ---------------------------------------------------------------------------
-  // URI PARSER
-  // ---------------------------------------------------------------------------
-
-  Server? _parseSingleServer(
-    String raw,
-  ) {
-    final value = raw.trim();
-
-    if (value.isEmpty) return null;
-
-    try {
-      if (value.startsWith('vless://')) {
-        return _parseVless(value);
-      }
-
-      if (value.startsWith('vmess://')) {
-        return _parseVmess(value);
-      }
-
-      if (value.startsWith('trojan://')) {
-        return _parseTrojan(value);
-      }
-
-      if (value.startsWith('ss://')) {
-        return _parseShadowsocks(value);
-      }
-
-      if (value.startsWith('hysteria2://') ||
-          value.startsWith('hy2://')) {
-        return _parseHysteria2(value);
-      }
-
-      if (value.startsWith('tuic://')) {
-        return _parseTuic(value);
-      }
-    } catch (_) {
-      return null;
-    }
-
-    return null;
-  }
-
-  Server? _parseVless(String raw) {
-    final uri = Uri.parse(raw);
-
-    final uuid =
-        uri.userInfo;
-
-    final host =
-        uri.host;
-
-    final port =
-        uri.port;
-
-    if (uuid.isEmpty ||
-        host.isEmpty ||
-        port <= 0) {
-      return null;
-    }
-
-    final q = uri.queryParameters;
-
-    final security =
-        q['security']?.toLowerCase();
-
-    final tls = <String, dynamic>{
-      'enabled':
-          security == 'tls' ||
-              security == 'reality',
-    };
-
-    if (q['sni'] != null) {
-      tls['server_name'] = q['sni'];
-    }
-
-    if (security == 'reality') {
-      tls['reality'] = {
-        if (q['pbk'] != null)
-          'public_key': q['pbk'],
-        if (q['sid'] != null)
-          'short_id': q['sid'],
+        'server_name':
+            p['sni'] ??
+            p['host'] ??
+            u.host,
       };
 
-      if (q['fp'] != null) {
+      if ((p['fp'] ?? '').isNotEmpty) {
         tls['utls'] = {
           'enabled': true,
-          'fingerprint': q['fp'],
+          'fingerprint': p['fp'],
         };
       }
+
+      if (security == 'reality' &&
+          (p['pbk'] ?? '').isNotEmpty) {
+        tls['reality'] = {
+          'enabled': true,
+          'public_key': p['pbk'],
+          if ((p['sid'] ?? '').isNotEmpty)
+            'short_id': p['sid'],
+        };
+      }
+
+      out['tls'] = tls;
     }
 
-    final outbound =
-        <String, dynamic>{
-      'type': 'vless',
-      'tag': 'proxy',
-      'server': host,
-      'server_port': port,
-      'uuid': uuid,
-      'tls': tls,
-    };
-
-    final flow = q['flow'];
-
-    if (flow != null &&
-        flow.isNotEmpty) {
-      outbound['flow'] = flow;
-    }
-
-    _applyTransport(
-      outbound,
-      q,
+    addTransport(
+      out,
+      p['type'] ??
+          p['network'] ??
+          'tcp',
+      p['path'] ?? '',
+      p['host'] ?? '',
     );
 
-    return Server(
-      raw: raw,
-      name: _serverName(
-        q['remarks'],
-        host,
-        port,
-      ),
-      type: 'VLESS',
-      host: host,
-      port: port,
-      outbound: outbound,
-    );
+    return out;
   }
 
-  Server? _parseVmess(String raw) {
-    final encoded =
-        raw.substring('vmess://'.length);
-
-    final normalized =
-        base64.normalize(encoded);
-
-    final jsonText =
-        utf8.decode(
-      base64Decode(normalized),
-    );
-
-    final map =
-        jsonDecode(jsonText);
-
-    if (map is! Map) return null;
-
-    final host =
-        map['add']?.toString() ?? '';
-
-    final port =
-        int.tryParse(
-              map['port']?.toString() ?? '',
-            ) ??
-            443;
-
-    final uuid =
-        map['id']?.toString() ?? '';
-
-    if (host.isEmpty ||
-        uuid.isEmpty) {
-      return null;
-    }
-
-    final security =
-        map['tls']?.toString().toLowerCase();
-
-    final tls = <String, dynamic>{
-      'enabled':
-          security == 'tls',
-    };
-
-    final sni =
-        map['sni']?.toString();
-
-    if (sni != null &&
-        sni.isNotEmpty) {
-      tls['server_name'] = sni;
-    }
-
-    if (map['fp'] != null) {
-      tls['utls'] = {
-        'enabled': true,
-        'fingerprint':
-            map['fp'].toString(),
-      };
-    }
-
-    final outbound =
-        <String, dynamic>{
-      'type': 'vmess',
-      'tag': 'proxy',
-      'server': host,
-      'server_port': port,
-      'uuid': uuid,
-      'security':
-          map['scy']?.toString() ?? 'auto',
-      'tls': tls,
-    };
-
-    final network =
-        map['net']?.toString();
-
-    if (network == 'ws') {
-      outbound['transport'] = {
-        'type': 'ws',
-        'path':
-            map['path']?.toString() ?? '/',
-        if (map['host'] != null)
-          'headers': {
-            'Host':
-                map['host'].toString(),
-          },
-      };
-    } else if (network == 'grpc') {
-      outbound['transport'] = {
-        'type': 'grpc',
-        'service_name':
-            map['path']?.toString() ?? '',
-      };
-    } else if (network == 'httpupgrade') {
-      outbound['transport'] = {
-        'type': 'httpupgrade',
-        'path':
-            map['path']?.toString() ?? '/',
-        if (map['host'] != null)
-          'host':
-              map['host'].toString(),
-      };
-    }
-
-    return Server(
-      raw: raw,
-      name: _serverName(
-        map['ps']?.toString(),
-        host,
-        port,
-      ),
-      type: 'VMess',
-      host: host,
-      port: port,
-      outbound: outbound,
-    );
-  }
-
-  Server? _parseTrojan(String raw) {
-    final uri = Uri.parse(raw);
-
-    final password =
-        uri.userInfo;
-
-    final host =
-        uri.host;
-
-    final port =
-        uri.port;
-
-    if (password.isEmpty ||
-        host.isEmpty ||
-        port <= 0) {
-      return null;
-    }
-
-    final q = uri.queryParameters;
+  Map<String, dynamic> trojan(Uri u) {
+    final p = u.queryParameters;
 
     final tls = <String, dynamic>{
       'enabled': true,
+      'server_name':
+          p['sni'] ??
+          p['host'] ??
+          u.host,
     };
 
-    if (q['sni'] != null) {
-      tls['server_name'] = q['sni'];
-    }
-
-    if (q['fp'] != null) {
+    if ((p['fp'] ?? '').isNotEmpty) {
       tls['utls'] = {
         'enabled': true,
-        'fingerprint': q['fp'],
+        'fingerprint': p['fp'],
       };
     }
 
-    final outbound =
-        <String, dynamic>{
+    final out = <String, dynamic>{
       'type': 'trojan',
       'tag': 'proxy',
-      'server': host,
-      'server_port': port,
-      'password': password,
+      'server': u.host,
+      'server_port': u.port,
+      'password': u.userInfo,
       'tls': tls,
     };
 
-    _applyTransport(
-      outbound,
-      q,
+    addTransport(
+      out,
+      p['type'] ?? 'tcp',
+      p['path'] ?? '',
+      p['host'] ?? '',
     );
 
-    return Server(
-      raw: raw,
-      name: _serverName(
-        q['remarks'],
-        host,
-        port,
-      ),
-      type: 'Trojan',
-      host: host,
-      port: port,
-      outbound: outbound,
-    );
+    return out;
   }
 
-  Server? _parseShadowsocks(String raw) {
-    final uri = Uri.parse(raw);
+  Map<String, dynamic>? shadowsocks(
+    Uri u,
+    String raw,
+  ) {
+    try {
+      var user = u.userInfo;
 
-    String userInfo = uri.userInfo;
+      if (user.isEmpty) {
+        var encoded = raw
+            .substring(
+              raw.indexOf('://') + 3,
+            )
+            .split('#')
+            .first;
 
-    if (userInfo.isEmpty) {
-      final afterScheme =
-          raw.substring('ss://'.length);
+        encoded = encoded
+            .replaceAll('-', '+')
+            .replaceAll('_', '/');
 
-      final hashIndex =
-          afterScheme.indexOf('#');
+        encoded += '=' *
+            ((4 - encoded.length % 4) % 4);
 
-      final withoutName =
-          hashIndex >= 0
-              ? afterScheme.substring(
-                  0,
-                  hashIndex,
-                )
-              : afterScheme;
-
-      try {
-        final decoded =
-            utf8.decode(
-          base64Decode(
-            base64.normalize(
-              withoutName,
-            ),
-          ),
+        user = utf8.decode(
+          base64.decode(encoded),
+          allowMalformed: true,
         );
+      }
 
-        userInfo = decoded;
-      } catch (_) {}
-    }
+      final colon = user.indexOf(':');
 
-    if (userInfo.isEmpty) {
-      return null;
-    }
+      if (colon <= 0) {
+        return null;
+      }
 
-    final separator =
-        userInfo.indexOf(':');
+      final method = Uri.decodeComponent(
+        user.substring(0, colon),
+      );
 
-    if (separator <= 0) {
-      return null;
-    }
+      final password = Uri.decodeComponent(
+        user.substring(colon + 1),
+      );
 
-    final method =
-        userInfo.substring(0, separator);
-
-    final password =
-        userInfo.substring(
-      separator + 1,
-    );
-
-    final host = uri.host;
-
-    final port = uri.port;
-
-    if (host.isEmpty ||
-        port <= 0) {
-      return null;
-    }
-
-    return Server(
-      raw: raw,
-      name: _serverName(
-        _decodeFragment(uri.fragment),
-        host,
-        port,
-      ),
-      type: 'Shadowsocks',
-      host: host,
-      port: port,
-      outbound: {
+      return {
         'type': 'shadowsocks',
         'tag': 'proxy',
-        'server': host,
-        'server_port': port,
+        'server': u.host,
+        'server_port': u.port,
         'method': method,
         'password': password,
-      },
-    );
-  }
-
-  Server? _parseHysteria2(String raw) {
-    final uri = Uri.parse(raw);
-
-    final password =
-        uri.userInfo;
-
-    final host =
-        uri.host;
-
-    final port =
-        uri.port;
-
-    if (password.isEmpty ||
-        host.isEmpty ||
-        port <= 0) {
-      return null;
-    }
-
-    final q = uri.queryParameters;
-
-    final tls = <String, dynamic>{
-      'enabled': true,
-    };
-
-    if (q['sni'] != null) {
-      tls['server_name'] = q['sni'];
-    }
-
-    if (q['insecure'] == '1' ||
-        q['allowInsecure'] == '1') {
-      tls['insecure'] = true;
-    }
-
-    return Server(
-      raw: raw,
-      name: _serverName(
-        q['remarks'] ??
-            _decodeFragment(uri.fragment),
-        host,
-        port,
-      ),
-      type: 'Hysteria2',
-      host: host,
-      port: port,
-      outbound: {
-        'type': 'hysteria2',
-        'tag': 'proxy',
-        'server': host,
-        'server_port': port,
-        'password': password,
-        'tls': tls,
-      },
-    );
-  }
-
-  Server? _parseTuic(String raw) {
-    final uri = Uri.parse(raw);
-
-    final userInfo =
-        uri.userInfo;
-
-    final separator =
-        userInfo.indexOf(':');
-
-    if (separator <= 0) {
-      return null;
-    }
-
-    final uuid =
-        userInfo.substring(0, separator);
-
-    final password =
-        userInfo.substring(
-      separator + 1,
-    );
-
-    final host =
-        uri.host;
-
-    final port =
-        uri.port;
-
-    if (uuid.isEmpty ||
-        password.isEmpty ||
-        host.isEmpty ||
-        port <= 0) {
-      return null;
-    }
-
-    final q = uri.queryParameters;
-
-    final tls = <String, dynamic>{
-      'enabled': true,
-    };
-
-    if (q['sni'] != null) {
-      tls['server_name'] = q['sni'];
-    }
-
-    return Server(
-      raw: raw,
-      name: _serverName(
-        q['remarks'] ??
-            _decodeFragment(uri.fragment),
-        host,
-        port,
-      ),
-      type: 'TUIC',
-      host: host,
-      port: port,
-      outbound: {
-        'type': 'tuic',
-        'tag': 'proxy',
-        'server': host,
-        'server_port': port,
-        'uuid': uuid,
-        'password': password,
-        'congestion_control':
-            q['congestion_control'] ??
-                'bbr',
-        'tls': tls,
-      },
-    );
-  }
-
-  void _applyTransport(
-    Map<String, dynamic> outbound,
-    Map<String, String> q,
-  ) {
-    final network =
-        q['type'] ??
-            q['network'] ??
-            'tcp';
-
-    switch (network) {
-      case 'ws':
-      case 'websocket':
-        outbound['transport'] = {
-          'type': 'ws',
-          'path': q['path'] ?? '/',
-          if (q['host'] != null)
-            'headers': {
-              'Host': q['host'],
-            },
-        };
-        break;
-
-      case 'grpc':
-        outbound['transport'] = {
-          'type': 'grpc',
-          'service_name':
-              q['serviceName'] ??
-                  q['service_name'] ??
-                  '',
-        };
-        break;
-
-      case 'httpupgrade':
-      case 'http-upgrade':
-        outbound['transport'] = {
-          'type': 'httpupgrade',
-          'path': q['path'] ?? '/',
-          if (q['host'] != null)
-            'host': q['host'],
-        };
-        break;
-
-      case 'http':
-      case 'h2':
-        outbound['transport'] = {
-          'type': 'http',
-          'path': q['path'] ?? '/',
-          if (q['host'] != null)
-            'host': [
-              q['host']!,
-            ],
-        };
-        break;
-    }
-  }
-
-  String _serverName(
-    String? preferred,
-    String host,
-    int port,
-  ) {
-    final name =
-        preferred?.trim() ?? '';
-
-    if (name.isNotEmpty) {
-      return _decodeFragment(name);
-    }
-
-    return '$host:$port';
-  }
-
-  String _decodeFragment(String value) {
-    if (value.isEmpty) return value;
-
-    try {
-      return Uri.decodeComponent(value);
+      };
     } catch (_) {
-      return value;
+      return null;
     }
   }
 
-  List<Server> _deduplicateServers(
-    List<Server> input,
-  ) {
-    final result = <Server>[];
-    final seen = <String>{};
-
-    for (final server in input) {
-      final key =
-          '${server.type}|${server.host}|${server.port}|${server.name}';
-
-      if (seen.add(key)) {
-        result.add(server);
-      }
-    }
-
-    return result;
-  }
-
-  // ---------------------------------------------------------------------------
-  // PING
-  // ---------------------------------------------------------------------------
-
-  Future<void> testAll({
-    bool silent = true,
-  }) async {
-    if (servers.isEmpty) return;
-
-    if (mounted) {
-      setState(() {
-        testing = true;
-      });
-    }
-
-    await Future.wait(
-      List.generate(
-        servers.length,
-        (index) async {
-          final server = servers[index];
-
-          final stopwatch =
-              Stopwatch()..start();
-
-          try {
-            final socket =
-                await Socket.connect(
-              server.host,
-              server.port,
-              timeout:
-                  const Duration(seconds: 3),
-            );
-
-            stopwatch.stop();
-
-            socket.destroy();
-
-            if (!mounted) return;
-
-            setState(() {
-              if (index < servers.length &&
-                  servers[index].host ==
-                      server.host &&
-                  servers[index].port ==
-                      server.port) {
-                servers[index].ping =
-                    stopwatch.elapsedMilliseconds;
-              }
-            });
-          } catch (_) {
-            if (!mounted) return;
-
-            setState(() {
-              if (index < servers.length) {
-                servers[index].ping = null;
-              }
-            });
-          }
-        },
-      ),
-    );
-
-    if (!mounted) return;
-
-    setState(() {
-      testing = false;
-    });
-
-    await _saveServers();
-  }
-
-  // ---------------------------------------------------------------------------
-  // SING-BOX CONFIG
-  // ---------------------------------------------------------------------------
-
-  Map<String, dynamic> buildConfig() {
-    final outbounds = <Map<String, dynamic>>[];
-
-    for (int i = 0; i < servers.length; i++) {
-      final original =
-          Map<String, dynamic>.from(
-        servers[i].outbound,
-      );
-
-      original['tag'] = 'proxy-$i';
-
-      outbounds.add(original);
-    }
-
-    if (outbounds.isEmpty) {
-      throw StateError(
-        'هیچ سروری وجود ندارد.',
-      );
-    }
-
-    String finalOutbound;
-
-    if (autoSelect &&
-        outbounds.length > 1) {
-      finalOutbound = 'auto';
-
-      outbounds.add({
-        'type': 'urltest',
-        'tag': 'auto',
-        'outbounds': [
-          for (int i = 0;
-              i < servers.length;
-              i++)
-            'proxy-$i',
-        ],
-        'url':
-            'https://www.gstatic.com/generate_204',
-        'interval': '3m',
-        'tolerance': 50,
-        'idle_timeout': '30m',
-      });
-    } else {
-      final index =
-          min(
-            selectedServer,
-            outbounds.length - 1,
-          );
-
-      finalOutbound =
-          'proxy-$index';
-    }
+  Map<String, dynamic> hysteria2(Uri u) {
+    final p = u.queryParameters;
 
     return {
+      'type': 'hysteria2',
+      'tag': 'proxy',
+      'server': u.host,
+      'server_port': u.port,
+      'password': u.userInfo,
+      'tls': {
+        'enabled': true,
+        'server_name':
+            p['sni'] ??
+            p['peer'] ??
+            u.host,
+        if (p['insecure'] == '1' ||
+            p['allowInsecure'] == '1')
+          'insecure': true,
+      },
+    };
+  }
+
+  Map<String, dynamic> tuic(Uri u) {
+    final separator =
+        u.userInfo.indexOf(':');
+
+    final uuid = separator > 0
+        ? u.userInfo.substring(
+            0,
+            separator,
+          )
+        : u.userInfo;
+
+    final password = separator > 0
+        ? u.userInfo.substring(
+            separator + 1,
+          )
+        : '';
+
+    final p = u.queryParameters;
+
+    return {
+      'type': 'tuic',
+      'tag': 'proxy',
+      'server': u.host,
+      'server_port': u.port,
+      'uuid': uuid,
+      'password': password,
+      'congestion_control':
+          p['congestion_control'] ??
+          'bbr',
+      'tls': {
+        'enabled': true,
+        'server_name':
+            p['sni'] ??
+            u.host,
+      },
+    };
+  }
+
+  void addTransport(
+    Map<String, dynamic> out,
+    String network,
+    String path,
+    String host,
+  ) {
+    final n = network.toLowerCase();
+
+    if (n == 'ws' ||
+        n == 'websocket') {
+      out['transport'] = {
+        'type': 'ws',
+        'path':
+            path.isEmpty ? '/' : path,
+        if (host.isNotEmpty)
+          'headers': {
+            'Host': host,
+          },
+      };
+    } else if (n == 'grpc') {
+      out['transport'] = {
+        'type': 'grpc',
+        'service_name': path,
+      };
+    } else if (n == 'httpupgrade') {
+      out['transport'] = {
+        'type': 'httpupgrade',
+        'path':
+            path.isEmpty ? '/' : path,
+        if (host.isNotEmpty)
+          'host': host,
+      };
+    } else if (n == 'h2' ||
+        n == 'http') {
+      out['transport'] = {
+        'type': 'http',
+        'path':
+            path.isEmpty ? '/' : path,
+        if (host.isNotEmpty)
+          'host': [host],
+      };
+    }
+  }
+
+  String makeConfig(Server server) {
+    final proxy =
+        Map<String, dynamic>.from(
+      server.outbound,
+    );
+
+    proxy['tag'] = 'proxy';
+
+    return jsonEncode({
       'log': {
         'level': 'warn',
       },
@@ -1882,12 +866,13 @@ class _HomePageState extends State<HomePage>
       'dns': {
         'servers': [
           {
-            'type': 'local',
-            'tag': 'local',
+            'tag': 'dns-remote',
+            'address':
+                'https://1.1.1.1/dns-query',
+            'detour': 'proxy',
           },
         ],
-        'final': 'local',
-        'strategy': 'ipv4_only',
+        'final': 'dns-remote',
       },
 
       'inbounds': [
@@ -1904,7 +889,7 @@ class _HomePageState extends State<HomePage>
       ],
 
       'outbounds': [
-        ...outbounds,
+        proxy,
         {
           'type': 'direct',
           'tag': 'direct',
@@ -1916,6 +901,7 @@ class _HomePageState extends State<HomePage>
       ],
 
       'route': {
+        'auto_detect_interface': true,
         'override_android_vpn': true,
         'rules': [
           {
@@ -1923,55 +909,164 @@ class _HomePageState extends State<HomePage>
             'action': 'hijack-dns',
           },
         ],
-        'final': finalOutbound,
+        'final': 'proxy',
       },
-    };
+    });
   }
 
-  // ---------------------------------------------------------------------------
-  // VPN
-  // ---------------------------------------------------------------------------
+  Future<void> testAll({
+    bool silent = false,
+  }) async {
+    if (servers.isEmpty) {
+      return;
+    }
+
+    if (mounted) {
+      setState(() {
+        testing = true;
+
+        if (!silent) {
+          stateText =
+              'در حال تست Ping...';
+        }
+      });
+    }
+
+    for (final server in servers) {
+      final stopwatch =
+          Stopwatch()..start();
+
+      try {
+        final socket =
+            await Socket.connect(
+          server.host,
+          server.port,
+          timeout:
+              const Duration(seconds: 3),
+        );
+
+        socket.destroy();
+
+        server.ping =
+            stopwatch.elapsedMilliseconds;
+      } catch (_) {
+        server.ping = null;
+      }
+
+      if (mounted && !silent) {
+        setState(() {});
+      }
+    }
+
+    if (!mounted) return;
+
+    setState(() {
+      testing = false;
+
+      if (!silent) {
+        stateText =
+            'تست Ping سرورها تمام شد';
+      }
+    });
+  }
+
+  Server? fastest() {
+    final good = servers
+        .where(
+          (s) => s.ping != null,
+        )
+        .toList();
+
+    if (good.isEmpty) {
+      return null;
+    }
+
+    good.sort(
+      (a, b) =>
+          a.ping!.compareTo(b.ping!),
+    );
+
+    return good.first;
+  }
 
   Future<void> connect() async {
-    if (connecting) return;
-
     if (servers.isEmpty) {
-      _showMessage(
-        'اول Subscription را دریافت کن.',
+      snack(
+        'ابتدا Subscription را دریافت کن',
       );
+      return;
+    }
+
+    if (connected || connecting) {
       return;
     }
 
     setState(() {
       connecting = true;
-      stateText = 'در حال اتصال...';
-      lastFault = '';
+      stateText =
+          'در حال انتخاب سریع‌ترین سرور...';
     });
+
+    if (servers.every(
+      (s) => s.ping == null,
+    )) {
+      await testAll(silent: true);
+    }
+
+    final best = fastest();
+
+    if (best == null) {
+      if (!mounted) return;
+
+      setState(() {
+        connecting = false;
+        stateText =
+            'سرور قابل اتصال پیدا نشد';
+      });
+
+      return;
+    }
 
     try {
       final permission =
           await vpn.requestVPNPermission();
 
       if (!permission) {
-        throw StateError(
-          'اجازه VPN داده نشد.',
+        throw Exception(
+          'VPN permission denied',
         );
       }
 
+      if (!mounted) return;
+
+      setState(() {
+        stateText =
+            'در حال بررسی کانفیگ...';
+      });
+
       final config =
-          jsonEncode(buildConfig());
+          makeConfig(best);
 
       await vpn.checkConfig(config);
+
+      if (!mounted) return;
+
+      setState(() {
+        stateText =
+            'در حال اتصال به ${best.name}...';
+      });
 
       await vpn.connect(
         SessionOptions(
           config: config,
           networkMode: NetworkMode.vpn,
-          notification: const NotificationConfig(
+          notification:
+              NotificationConfig(
             title: 'Light speed 🔥',
             showTrafficStats: true,
             showStopButton: true,
-            stopButtonLabel: 'قطع اتصال',
+            stopButtonLabel:
+                'قطع اتصال',
           ),
         ),
       );
@@ -1979,27 +1074,26 @@ class _HomePageState extends State<HomePage>
       if (!mounted) return;
 
       setState(() {
-        connected = true;
         connecting = false;
-        connectedAt = DateTime.now();
-        stateText = 'متصل';
-        sessionUpload = 0;
-        sessionDownload = 0;
+        connected = true;
+        stateText =
+            'متصل • ${best.name}';
       });
-
-      _startConnectionTimer();
     } catch (e) {
+      try {
+        await vpn.disconnect();
+      } catch (_) {}
+
       if (!mounted) return;
 
       setState(() {
-        connected = false;
         connecting = false;
+        connected = false;
         stateText = 'اتصال ناموفق';
-        lastFault = e.toString();
       });
 
-      _showMessage(
-        'اتصال ناموفق بود:\n$e',
+      snack(
+        'خطای VPN: $e',
       );
     }
   }
@@ -2009,43 +1103,52 @@ class _HomePageState extends State<HomePage>
       await vpn.disconnect();
     } catch (_) {}
 
-    connectionTimer?.cancel();
-
     if (!mounted) return;
 
     setState(() {
       connected = false;
       connecting = false;
-      connectedAt = null;
-      uploadSpeed = 0;
-      downloadSpeed = 0;
-      stateText = 'قطع';
+      stateText = 'اتصال قطع شد';
+
+      download = '0 Mbps';
+      upload = '0 Mbps';
+
+      downloadTotalBytes = 0;
+      uploadTotalBytes = 0;
     });
   }
 
-  void _startConnectionTimer() {
-    connectionTimer?.cancel();
+  String speed(dynamic bps) {
+    final n = bps is num
+        ? bps.toDouble()
+        : 0.0;
 
-    connectionTimer =
-        Timer.periodic(
-      const Duration(seconds: 1),
-      (_) {
-        if (!mounted) return;
+    if (n <= 0) {
+      return '0 Mbps';
+    }
 
-        if (connectedAt == null) return;
+    if (n >= 1000000000) {
+      return '${(n / 1000000000).toStringAsFixed(2)} Gbps';
+    }
 
-        setState(() {});
-      },
-    );
+    if (n >= 1000000) {
+      return '${(n / 1000000).toStringAsFixed(2)} Mbps';
+    }
+
+    if (n >= 1000) {
+      return '${(n / 1000).toStringAsFixed(1)} Kbps';
+    }
+
+    return '${n.toStringAsFixed(0)} bps';
   }
-
-  // ---------------------------------------------------------------------------
-  // UI HELPERS
-  // ---------------------------------------------------------------------------
 
   String size(int? bytes) {
     if (bytes == null) {
       return 'نامشخص';
+    }
+
+    if (bytes == 0) {
+      return '0 B';
     }
 
     if (bytes < 1024) {
@@ -2056,203 +1159,167 @@ class _HomePageState extends State<HomePage>
       return '${(bytes / 1024).toStringAsFixed(1)} KB';
     }
 
-    if (bytes < 1024 * 1024 * 1024) {
-      return '${(bytes / (1024 * 1024)).toStringAsFixed(1)} MB';
+    if (bytes <
+        1024 * 1024 * 1024) {
+      return '${(bytes / 1024 / 1024).toStringAsFixed(1)} MB';
     }
 
-    if (bytes < 1024 * 1024 * 1024 * 1024) {
-      return '${(bytes / (1024 * 1024 * 1024)).toStringAsFixed(2)} GB';
+    if (bytes <
+        1024 *
+            1024 *
+            1024 *
+            1024) {
+      return '${(bytes / 1024 / 1024 / 1024).toStringAsFixed(2)} GB';
     }
 
-    return '${(bytes / (1024 * 1024 * 1024 * 1024)).toStringAsFixed(2)} TB';
+    return '${(bytes / 1024 / 1024 / 1024 / 1024).toStringAsFixed(2)} TB';
   }
 
-  String speed(int bitsPerSecond) {
-    if (bitsPerSecond <= 0) {
-      return '0 B/s';
+  String _dateFromUnix(int timestamp) {
+    try {
+      final milliseconds =
+          timestamp > 20000000000
+              ? timestamp
+              : timestamp * 1000;
+
+      final date =
+          DateTime.fromMillisecondsSinceEpoch(
+        milliseconds,
+      );
+
+      return '${date.year}/'
+          '${date.month.toString().padLeft(2, '0')}/'
+          '${date.day.toString().padLeft(2, '0')}';
+    } catch (_) {
+      return 'نامشخص';
     }
-
-    final bytes =
-        bitsPerSecond / 8;
-
-    if (bytes < 1024) {
-      return '${bytes.toStringAsFixed(0)} B/s';
-    }
-
-    if (bytes < 1024 * 1024) {
-      return '${(bytes / 1024).toStringAsFixed(1)} KB/s';
-    }
-
-    if (bytes < 1024 * 1024 * 1024) {
-      return '${(bytes / (1024 * 1024)).toStringAsFixed(1)} MB/s';
-    }
-
-    return '${(bytes / (1024 * 1024 * 1024)).toStringAsFixed(2)} GB/s';
   }
 
   String remainingTime() {
-    final expire =
-        subscription.expire;
-
-    if (expire == null ||
-        expire <= 0) {
+    if (expireAt == null ||
+        expireAt! <= 0) {
       return 'نامشخص';
     }
 
-    final expiry =
-        DateTime.fromMillisecondsSinceEpoch(
-      expire * 1000,
-    );
+    try {
+      final milliseconds =
+          expireAt! > 20000000000
+              ? expireAt!
+              : expireAt! * 1000;
 
-    final diff =
-        expiry.difference(
-      DateTime.now(),
-    );
+      final expire =
+          DateTime.fromMillisecondsSinceEpoch(
+        milliseconds,
+      );
 
-    if (diff.isNegative) {
-      return 'منقضی شده';
+      final difference =
+          expire.difference(
+        DateTime.now(),
+      );
+
+      if (difference.isNegative) {
+        return 'منقضی شده';
+      }
+
+      final days =
+          difference.inDays;
+
+      final hours =
+          difference.inHours.remainder(24);
+
+      final minutes =
+          difference.inMinutes.remainder(60);
+
+      if (days > 0) {
+        return '$days روز و $hours ساعت';
+      }
+
+      if (hours > 0) {
+        return '$hours ساعت و $minutes دقیقه';
+      }
+
+      return '$minutes دقیقه';
+    } catch (_) {
+      return 'نامشخص';
     }
-
-    final days =
-        diff.inDays;
-
-    final hours =
-        diff.inHours % 24;
-
-    if (days > 0) {
-      return '$days روز و $hours ساعت';
-    }
-
-    final minutes =
-        diff.inMinutes % 60;
-
-    return '$hours ساعت و $minutes دقیقه';
   }
 
-  String connectionDuration() {
-    if (connectedAt == null) {
-      return '00:00:00';
-    }
-
-    final diff =
-        DateTime.now()
-            .difference(connectedAt!);
-
-    final h =
-        diff.inHours
-            .toString()
-            .padLeft(2, '0');
-
-    final m =
-        (diff.inMinutes % 60)
-            .toString()
-            .padLeft(2, '0');
-
-    final s =
-        (diff.inSeconds % 60)
-            .toString()
-            .padLeft(2, '0');
-
-    return '$h:$m:$s';
-  }
-
-  double usagePercent() {
-    final total =
-        subscription.total;
-
-    final used =
-        subscription.used;
-
-    if (total == null ||
-        used == null ||
-        total <= 0) {
-      return 0;
-    }
-
-    return min(
-      1,
-      max(
-        0,
-        used / total,
-      ),
-    );
-  }
-
-  void _showMessage(String text) {
+  void snack(String text) {
     if (!mounted) return;
 
     ScaffoldMessenger.of(context)
       ..hideCurrentSnackBar()
       ..showSnackBar(
         SnackBar(
-          content: Text(
-            text,
-            textDirection: TextDirection.rtl,
-          ),
+          content: Text(text),
           behavior:
               SnackBarBehavior.floating,
         ),
       );
   }
 
-  Widget _card({
-    required Widget child,
-    EdgeInsets padding =
-        const EdgeInsets.all(18),
-  }) {
-    return Card(
-      margin:
-          const EdgeInsets.only(bottom: 14),
-      child: Padding(
-        padding: padding,
-        child: child,
-      ),
-    );
-  }
+  @override
+  Widget build(BuildContext context) {
+    final pages = [
+      _home(),
+      _servers(),
+      _traffic(),
+      _subscription(),
+      _settings(),
+    ];
 
-  Widget _stat(
-    String title,
-    String value,
-    IconData icon,
-  ) {
-    return Expanded(
-      child: Container(
-        padding:
-            const EdgeInsets.all(14),
-        decoration: BoxDecoration(
-          color: const Color(0xFF101C2D),
-          borderRadius:
-              BorderRadius.circular(16),
+    return Directionality(
+      textDirection:
+          TextDirection.rtl,
+      child: Scaffold(
+        body: SafeArea(
+          child: pages[page],
         ),
-        child: Column(
-          crossAxisAlignment:
-              CrossAxisAlignment.start,
-          children: [
-            Icon(
-              icon,
-              size: 21,
-              color:
-                  const Color(0xFF00D4FF),
+
+        bottomNavigationBar:
+            NavigationBar(
+          selectedIndex: page,
+          onDestinationSelected:
+              (index) {
+            setState(() {
+              page = index;
+            });
+          },
+          destinations: const [
+            NavigationDestination(
+              icon:
+                  Icon(Icons.home_outlined),
+              selectedIcon:
+                  Icon(Icons.home),
+              label: 'خانه',
             ),
-            const SizedBox(height: 8),
-            Text(
-              title,
-              style: const TextStyle(
-                color: Colors.white60,
-                fontSize: 12,
-              ),
+            NavigationDestination(
+              icon:
+                  Icon(Icons.dns_outlined),
+              selectedIcon:
+                  Icon(Icons.dns),
+              label: 'سرورها',
             ),
-            const SizedBox(height: 3),
-            Text(
-              value,
-              maxLines: 1,
-              overflow:
-                  TextOverflow.ellipsis,
-              style: const TextStyle(
-                fontSize: 16,
-                fontWeight:
-                    FontWeight.bold,
-              ),
+            NavigationDestination(
+              icon:
+                  Icon(Icons.bar_chart_outlined),
+              selectedIcon:
+                  Icon(Icons.bar_chart),
+              label: 'ترافیک',
+            ),
+            NavigationDestination(
+              icon:
+                  Icon(Icons.link_outlined),
+              selectedIcon:
+                  Icon(Icons.link),
+              label: 'اشتراک',
+            ),
+            NavigationDestination(
+              icon:
+                  Icon(Icons.settings_outlined),
+              selectedIcon:
+                  Icon(Icons.settings),
+              label: 'تنظیمات',
             ),
           ],
         ),
@@ -2260,441 +1327,60 @@ class _HomePageState extends State<HomePage>
     );
   }
 
-  // ---------------------------------------------------------------------------
-  // HOME PAGE
-  // ---------------------------------------------------------------------------
-
-  Widget _homePage() {
-    final used =
-        subscription.used;
-
-    final total =
-        subscription.total;
-
-    final remaining =
-        subscription.remaining;
-
-    return RefreshIndicator(
-      onRefresh: () =>
-          loadSubscription(),
-      child: ListView(
-        padding:
-            const EdgeInsets.fromLTRB(
-          16,
-          16,
-          16,
-          100,
-        ),
-        children: [
-          _header(),
-
-          const SizedBox(height: 12),
-
-          _subscriptionCard(
-            used: used,
-            total: total,
-            remaining: remaining,
-          ),
-
-          _trafficCard(),
-
-          _connectionCard(),
-
-          _quickStats(),
-
-          if (lastFault.isNotEmpty)
-            _errorCard(),
-        ],
-      ),
-    );
-  }
-
-  Widget _header() {
-    return Row(
-      children: [
-        Container(
-          width: 52,
-          height: 52,
-          decoration: BoxDecoration(
-            borderRadius:
-                BorderRadius.circular(16),
-            gradient:
-                const LinearGradient(
-              colors: [
-                Color(0xFF00D4FF),
-                Color(0xFF0066FF),
-              ],
-            ),
-          ),
-          child: const Icon(
-            Icons.bolt_rounded,
-            color: Colors.white,
-            size: 30,
-          ),
-        ),
-
-        const SizedBox(width: 12),
-
-        Expanded(
-          child: Column(
-            crossAxisAlignment:
-                CrossAxisAlignment.start,
-            children: [
-              const Text(
-                'Light speed 🔥',
-                style: TextStyle(
-                  fontSize: 23,
-                  fontWeight:
-                      FontWeight.w800,
-                ),
-              ),
-              Text(
-                subscriptionTitle,
-                maxLines: 1,
-                overflow:
-                    TextOverflow.ellipsis,
-                style: const TextStyle(
-                  color: Colors.white60,
-                ),
-              ),
-            ],
-          ),
-        ),
-
-        IconButton(
-          onPressed:
-              loading
-                  ? null
-                  : () => loadSubscription(),
-          icon: loading
-              ? const SizedBox(
-                  width: 22,
-                  height: 22,
-                  child:
-                      CircularProgressIndicator(
-                    strokeWidth: 2,
-                  ),
-                )
-              : const Icon(
-                  Icons.refresh_rounded,
-                ),
-        ),
-      ],
-    );
-  }
-
-  Widget _subscriptionCard({
-    required int? used,
-    required int? total,
-    required int? remaining,
-  }) {
-    return _card(
-      child: Column(
-        children: [
-          Row(
-            children: [
-              const Icon(
-                Icons.cloud_rounded,
-                color:
-                    Color(0xFF00D4FF),
-              ),
-              const SizedBox(width: 10),
-              const Expanded(
-                child: Text(
-                  'اطلاعات Subscription',
-                  style: TextStyle(
-                    fontSize: 17,
-                    fontWeight:
-                        FontWeight.bold,
-                  ),
-                ),
-              ),
-              if (testing)
-                const SizedBox(
-                  width: 18,
-                  height: 18,
-                  child:
-                      CircularProgressIndicator(
-                    strokeWidth: 2,
-                  ),
-                ),
-            ],
-          ),
-
-          const SizedBox(height: 18),
-
-          Row(
-            children: [
-              _stat(
-                'کل حجم',
-                size(total),
-                Icons.data_usage_rounded,
-              ),
-              const SizedBox(width: 10),
-              _stat(
-                'مصرف',
-                size(used),
-                Icons.pie_chart_rounded,
-              ),
-              const SizedBox(width: 10),
-              _stat(
-                'باقی‌مانده',
-                size(remaining),
-                Icons.data_saver_on_rounded,
-              ),
-            ],
-          ),
-
-          const SizedBox(height: 18),
-
-          ClipRRect(
-            borderRadius:
-                BorderRadius.circular(20),
-            child:
-                LinearProgressIndicator(
-              minHeight: 8,
-              value: usagePercent(),
-              backgroundColor:
-                  Colors.white10,
-            ),
-          ),
-
-          const SizedBox(height: 14),
-
-          Row(
-            children: [
-              Expanded(
-                child: _infoLine(
-                  Icons.upload_rounded,
-                  'آپلود اشتراک',
-                  size(
-                    subscription.upload,
-                  ),
-                ),
-              ),
-              Expanded(
-                child: _infoLine(
-                  Icons.download_rounded,
-                  'دانلود اشتراک',
-                  size(
-                    subscription.download,
-                  ),
-                ),
-              ),
-            ],
-          ),
-
-          const SizedBox(height: 10),
-
-          _infoLine(
-            Icons.timer_outlined,
-            'زمان باقی‌مانده',
-            remainingTime(),
-          ),
-
-          const SizedBox(height: 8),
-
-          Align(
-            alignment:
-                Alignment.centerLeft,
-            child: Text(
-              stateText,
-              style: const TextStyle(
-                color: Colors.white54,
-                fontSize: 12,
-              ),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _infoLine(
-    IconData icon,
+  Widget header(
     String title,
-    String value,
+    String subtitle,
   ) {
     return Padding(
       padding:
-          const EdgeInsets.symmetric(
-        vertical: 5,
+          const EdgeInsets.only(
+        bottom: 18,
       ),
       child: Row(
         children: [
-          Icon(
-            icon,
-            size: 18,
-            color:
-                const Color(0xFF00D4FF),
+          Container(
+            width: 46,
+            height: 46,
+            decoration:
+                const BoxDecoration(
+              shape: BoxShape.circle,
+              gradient:
+                  LinearGradient(
+                colors: [
+                  Color(0xFF00E5FF),
+                  Color(0xFF7C4DFF),
+                ],
+              ),
+            ),
+            child: const Icon(
+              Icons.bolt,
+              color: Colors.white,
+            ),
           ),
-          const SizedBox(width: 8),
+          const SizedBox(width: 12),
           Expanded(
-            child: Text(
-              title,
-              style: const TextStyle(
-                color: Colors.white60,
-                fontSize: 12,
-              ),
-            ),
-          ),
-          Text(
-            value,
-            style: const TextStyle(
-              fontWeight:
-                  FontWeight.bold,
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _trafficCard() {
-    return _card(
-      child: Column(
-        crossAxisAlignment:
-            CrossAxisAlignment.start,
-        children: [
-          const Text(
-            'ترافیک لحظه‌ای VPN',
-            style: TextStyle(
-              fontSize: 17,
-              fontWeight:
-                  FontWeight.bold,
-            ),
-          ),
-
-          const SizedBox(height: 14),
-
-          Row(
-            children: [
-              _stat(
-                'دانلود',
-                speed(downloadSpeed),
-                Icons.download_rounded,
-              ),
-              const SizedBox(width: 10),
-              _stat(
-                'آپلود',
-                speed(uploadSpeed),
-                Icons.upload_rounded,
-              ),
-            ],
-          ),
-
-          const SizedBox(height: 14),
-
-          Row(
-            children: [
-              Expanded(
-                child: _infoLine(
-                  Icons.download_done_rounded,
-                  'دانلود این جلسه',
-                  size(sessionDownload),
-                ),
-              ),
-              Expanded(
-                child: _infoLine(
-                  Icons.upload_file_rounded,
-                  'آپلود این جلسه',
-                  size(sessionUpload),
-                ),
-              ),
-            ],
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _connectionCard() {
-    return _card(
-      child: Column(
-        children: [
-          Row(
-            children: [
-              Container(
-                width: 13,
-                height: 13,
-                decoration:
-                    BoxDecoration(
-                  shape:
-                      BoxShape.circle,
-                  color: connected
-                      ? Colors.greenAccent
-                      : Colors.redAccent,
-                ),
-              ),
-              const SizedBox(width: 10),
-              Expanded(
-                child: Text(
-                  connected
-                      ? 'اتصال فعال است'
-                      : 'اتصال برقرار نیست',
+            child: Column(
+              crossAxisAlignment:
+                  CrossAxisAlignment.start,
+              children: [
+                Text(
+                  title,
                   style:
                       const TextStyle(
-                    fontSize: 17,
+                    fontSize: 22,
                     fontWeight:
-                        FontWeight.bold,
+                        FontWeight.w800,
                   ),
                 ),
-              ),
-              if (connected)
                 Text(
-                  connectionDuration(),
+                  subtitle,
                   style:
                       const TextStyle(
                     color:
-                        Colors.white60,
+                        Colors.white54,
                   ),
                 ),
-            ],
-          ),
-
-          const SizedBox(height: 18),
-
-          SizedBox(
-            width: double.infinity,
-            height: 58,
-            child: FilledButton.icon(
-              onPressed:
-                  connecting
-                      ? null
-                      : connected
-                          ? disconnect
-                          : connect,
-              icon: connecting
-                  ? const SizedBox(
-                      width: 20,
-                      height: 20,
-                      child:
-                          CircularProgressIndicator(
-                        strokeWidth: 2,
-                        color:
-                            Colors.white,
-                      ),
-                    )
-                  : Icon(
-                      connected
-                          ? Icons
-                              .power_settings_new_rounded
-                          : Icons
-                              .bolt_rounded,
-                    ),
-              label: Text(
-                connecting
-                    ? 'در حال اتصال...'
-                    : connected
-                        ? 'قطع اتصال'
-                        : 'اتصال',
-                style:
-                    const TextStyle(
-                  fontSize: 17,
-                  fontWeight:
-                      FontWeight.bold,
-                ),
-              ),
+              ],
             ),
           ),
         ],
@@ -2702,810 +1388,887 @@ class _HomePageState extends State<HomePage>
     );
   }
 
-  Widget _quickStats() {
-    return Row(
-      children: [
-        Expanded(
-          child: _smallBox(
-            Icons.dns_rounded,
-            'سرورها',
-            '${servers.length}',
-          ),
-        ),
-        const SizedBox(width: 10),
-        Expanded(
-          child: _smallBox(
-            Icons.flash_on_rounded,
-            'انتخاب',
-            autoSelect
-                ? 'خودکار'
-                : 'دستی',
-          ),
-        ),
-        const SizedBox(width: 10),
-        Expanded(
-          child: _smallBox(
-            Icons.sync_rounded,
-            'آپدیت',
-            '۱۵ دقیقه',
-          ),
-        ),
-      ],
-    );
-  }
-
-  Widget _smallBox(
-    IconData icon,
-    String title,
-    String value,
-  ) {
+  Widget card(Widget child) {
     return Container(
-      padding:
-          const EdgeInsets.all(14),
-      decoration: BoxDecoration(
-        color: const Color(0xFF0B1422),
-        borderRadius:
-            BorderRadius.circular(18),
-      ),
-      child: Column(
-        children: [
-          Icon(
-            icon,
-            color:
-                const Color(0xFF00D4FF),
-          ),
-          const SizedBox(height: 8),
-          Text(
-            title,
-            style: const TextStyle(
-              color: Colors.white54,
-              fontSize: 11,
-            ),
-          ),
-          const SizedBox(height: 3),
-          Text(
-            value,
-            style: const TextStyle(
-              fontWeight:
-                  FontWeight.bold,
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _errorCard() {
-    return _card(
-      child: Row(
-        crossAxisAlignment:
-            CrossAxisAlignment.start,
-        children: [
-          const Icon(
-            Icons.warning_amber_rounded,
-            color: Colors.orangeAccent,
-          ),
-          const SizedBox(width: 10),
-          Expanded(
-            child: Text(
-              lastFault,
-              style: const TextStyle(
-                color: Colors.white70,
-                fontSize: 12,
-              ),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  // ---------------------------------------------------------------------------
-  // SERVERS PAGE
-  // ---------------------------------------------------------------------------
-
-  Widget _serversPage() {
-    return Column(
-      children: [
-        Padding(
-          padding:
-              const EdgeInsets.fromLTRB(
-            16,
-            16,
-            16,
-            8,
-          ),
-          child: Row(
-            children: [
-              const Expanded(
-                child: Text(
-                  'سرورها',
-                  style: TextStyle(
-                    fontSize: 24,
-                    fontWeight:
-                        FontWeight.bold,
-                  ),
-                ),
-              ),
-              IconButton(
-                onPressed:
-                    testing
-                        ? null
-                        : () => testAll(
-                              silent: false,
-                            ),
-                icon: testing
-                    ? const SizedBox(
-                        width: 20,
-                        height: 20,
-                        child:
-                            CircularProgressIndicator(
-                          strokeWidth: 2,
-                        ),
-                      )
-                    : const Icon(
-                        Icons.speed_rounded,
-                      ),
-              ),
-            ],
-          ),
-        ),
-
-        Expanded(
-          child: servers.isEmpty
-              ? _emptyServers()
-              : ListView.builder(
-                  padding:
-                      const EdgeInsets.fromLTRB(
-                    16,
-                    8,
-                    16,
-                    100,
-                  ),
-                  itemCount:
-                      servers.length,
-                  itemBuilder:
-                      (context, index) {
-                    return _serverTile(
-                      index,
-                    );
-                  },
-                ),
-        ),
-      ],
-    );
-  }
-
-  Widget _emptyServers() {
-    return Center(
-      child: Padding(
-        padding:
-            const EdgeInsets.all(30),
-        child: Column(
-          mainAxisAlignment:
-              MainAxisAlignment.center,
-          children: [
-            const Icon(
-              Icons.dns_outlined,
-              size: 70,
-              color: Colors.white24,
-            ),
-            const SizedBox(height: 18),
-            const Text(
-              'هنوز سروری دریافت نشده',
-              style: TextStyle(
-                fontSize: 18,
-                fontWeight:
-                    FontWeight.bold,
-              ),
-            ),
-            const SizedBox(height: 10),
-            const Text(
-              'لینک Subscription را وارد کن و بروزرسانی را بزن.',
-              textAlign:
-                  TextAlign.center,
-              style: TextStyle(
-                color: Colors.white54,
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  Widget _serverTile(int index) {
-    final server =
-        servers[index];
-
-    final selected =
-        !autoSelect &&
-            selectedServer == index;
-
-    return Card(
       margin:
           const EdgeInsets.only(
-        bottom: 10,
+        bottom: 12,
       ),
-      child: InkWell(
+      padding:
+          const EdgeInsets.all(16),
+      decoration:
+          BoxDecoration(
+        color:
+            const Color(0xFF0D1728),
         borderRadius:
             BorderRadius.circular(22),
-        onTap: () {
-          setState(() {
-            selectedServer = index;
-            autoSelect = false;
-          });
-        },
-        child: Padding(
-          padding:
-              const EdgeInsets.all(15),
-          child: Row(
-            children: [
-              Container(
-                width: 48,
-                height: 48,
-                decoration:
-                    BoxDecoration(
-                  color: selected
-                      ? const Color(
-                          0xFF00D4FF,
-                        ).withValues(
-                          alpha: .15,
-                        )
-                      : Colors.white
-                          .withValues(
-                          alpha: .05,
-                        ),
-                  borderRadius:
-                      BorderRadius.circular(
-                    15,
+        border: Border.all(
+          color: Colors.white
+              .withValues(
+            alpha: .05,
+          ),
+        ),
+      ),
+      child: child,
+    );
+  }
+
+  Widget _home() {
+    final best = fastest();
+
+    final percent =
+        totalBytes == null ||
+                totalBytes! <= 0
+            ? 0.0
+            : ((usedBytes ?? 0) /
+                    totalBytes!)
+                .clamp(0.0, 1.0);
+
+    return ListView(
+      padding:
+          const EdgeInsets.all(18),
+      children: [
+        header(
+          'Light speed 🔥',
+          'اتصال واقعی با sing-box',
+        ),
+
+        const SizedBox(height: 8),
+
+        Center(
+          child: GestureDetector(
+            onTap: connecting
+                ? null
+                : connected
+                    ? disconnect
+                    : connect,
+            child: Container(
+              width: 200,
+              height: 200,
+              decoration:
+                  BoxDecoration(
+                shape: BoxShape.circle,
+                gradient:
+                    LinearGradient(
+                  colors: connected
+                      ? const [
+                          Color(0xFF00E676),
+                          Color(0xFF00B8D4),
+                        ]
+                      : const [
+                          Color(0xFF00E5FF),
+                          Color(0xFF7C4DFF),
+                        ],
+                ),
+                boxShadow: [
+                  BoxShadow(
+                    color: (connected
+                            ? const Color(
+                                0xFF00E676,
+                              )
+                            : const Color(
+                                0xFF00E5FF,
+                              ))
+                        .withValues(
+                      alpha: .35,
+                    ),
+                    blurRadius: 40,
+                    spreadRadius: 8,
+                  ),
+                ],
+              ),
+              child: Center(
+                child: Container(
+                  width: 176,
+                  height: 176,
+                  decoration:
+                      const BoxDecoration(
+                    shape:
+                        BoxShape.circle,
+                    color:
+                        Color(0xFF081322),
+                  ),
+                  child: Center(
+                    child: connecting
+                        ? const CircularProgressIndicator()
+                        : Column(
+                            mainAxisAlignment:
+                                MainAxisAlignment
+                                    .center,
+                            children: [
+                              Icon(
+                                connected
+                                    ? Icons
+                                        .power
+                                    : Icons
+                                        .bolt,
+                                size: 48,
+                                color: connected
+                                    ? const Color(
+                                        0xFF00E676,
+                                      )
+                                    : const Color(
+                                        0xFF00E5FF,
+                                      ),
+                              ),
+                              const SizedBox(
+                                height: 8,
+                              ),
+                              Text(
+                                connected
+                                    ? 'قطع اتصال'
+                                    : 'اتصال',
+                                style:
+                                    const TextStyle(
+                                  fontSize:
+                                      18,
+                                  fontWeight:
+                                      FontWeight
+                                          .bold,
+                                ),
+                              ),
+                            ],
+                          ),
                   ),
                 ),
-                child: Icon(
-                  Icons.dns_rounded,
-                  color: selected
-                      ? const Color(
-                          0xFF00D4FF,
-                        )
-                      : Colors.white54,
-                ),
               ),
+            ),
+          ),
+        ),
 
-              const SizedBox(width: 12),
+        const SizedBox(height: 16),
 
+        Center(
+          child: Text(
+            stateText,
+            textAlign:
+                TextAlign.center,
+            style: TextStyle(
+              color: connected
+                  ? const Color(
+                      0xFF00E676,
+                    )
+                  : Colors.white70,
+            ),
+          ),
+        ),
+
+        const SizedBox(height: 20),
+
+        card(
+          Row(
+            children: [
+              const Icon(
+                Icons.public,
+                color:
+                    Color(0xFF00E5FF),
+              ),
+              const SizedBox(
+                width: 12,
+              ),
               Expanded(
                 child: Column(
                   crossAxisAlignment:
-                      CrossAxisAlignment.start,
+                      CrossAxisAlignment
+                          .start,
                   children: [
-                    Text(
-                      server.name,
-                      maxLines: 1,
-                      overflow:
-                          TextOverflow.ellipsis,
+                    const Text(
+                      'سریع‌ترین سرور',
                       style:
-                          const TextStyle(
-                        fontWeight:
-                            FontWeight.bold,
-                        fontSize: 15,
-                      ),
-                    ),
-                    const SizedBox(
-                      height: 5,
-                    ),
-                    Text(
-                      '${server.type} • ${server.host}:${server.port}',
-                      maxLines: 1,
-                      overflow:
-                          TextOverflow.ellipsis,
-                      style:
-                          const TextStyle(
+                          TextStyle(
                         color:
                             Colors.white54,
-                        fontSize: 11,
+                      ),
+                    ),
+                    Text(
+                      best?.name ??
+                          'هنوز انتخاب نشده',
+                      maxLines: 1,
+                      overflow:
+                          TextOverflow
+                              .ellipsis,
+                    ),
+                  ],
+                ),
+              ),
+              if (best?.ping != null)
+                Text(
+                  '${best!.ping} ms',
+                ),
+            ],
+          ),
+        ),
+
+        Row(
+          children: [
+            Expanded(
+              child: card(
+                Column(
+                  crossAxisAlignment:
+                      CrossAxisAlignment
+                          .start,
+                  children: [
+                    const Text(
+                      'دانلود',
+                      style:
+                          TextStyle(
+                        color:
+                            Colors.white54,
+                      ),
+                    ),
+                    Text(
+                      download,
+                      style:
+                          const TextStyle(
+                        fontSize: 18,
+                        fontWeight:
+                            FontWeight.bold,
                       ),
                     ),
                   ],
                 ),
               ),
+            ),
 
-              const SizedBox(width: 8),
+            const SizedBox(
+              width: 10,
+            ),
 
-              _pingWidget(
-                server.ping,
+            Expanded(
+              child: card(
+                Column(
+                  crossAxisAlignment:
+                      CrossAxisAlignment
+                          .start,
+                  children: [
+                    const Text(
+                      'آپلود',
+                      style:
+                          TextStyle(
+                        color:
+                            Colors.white54,
+                      ),
+                    ),
+                    Text(
+                      upload,
+                      style:
+                          const TextStyle(
+                        fontSize: 18,
+                        fontWeight:
+                            FontWeight.bold,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ],
+        ),
+
+        card(
+          Column(
+            crossAxisAlignment:
+                CrossAxisAlignment
+                    .start,
+            children: [
+              Row(
+                children: [
+                  const Icon(
+                    Icons.data_usage,
+                    color:
+                        Color(0xFF7C4DFF),
+                  ),
+                  const SizedBox(
+                    width: 8,
+                  ),
+                  const Expanded(
+                    child: Text(
+                      'حجم اشتراک',
+                    ),
+                  ),
+                  Text(
+                    size(totalBytes),
+                  ),
+                ],
               ),
 
-              const SizedBox(width: 8),
+              const SizedBox(
+                height: 12,
+              ),
 
-              if (selected)
-                const Icon(
-                  Icons.check_circle_rounded,
-                  color:
-                      Color(0xFF00D4FF),
-                ),
+              LinearProgressIndicator(
+                value: percent,
+                minHeight: 9,
+              ),
+
+              const SizedBox(
+                height: 10,
+              ),
+
+              Text(
+                'مصرف: ${size(usedBytes)}',
+              ),
+
+              const SizedBox(
+                height: 5,
+              ),
+
+              Text(
+                'باقی‌مانده: ${size(
+                  totalBytes == null
+                      ? null
+                      : max(
+                          0,
+                          totalBytes! -
+                              (usedBytes ??
+                                  0),
+                        ),
+                )}',
+              ),
             ],
           ),
         ),
-      ),
-    );
-  }
 
-  Widget _pingWidget(int? ping) {
-    if (ping == null) {
-      return const Text(
-        '—',
-        style: TextStyle(
-          color: Colors.white38,
-        ),
-      );
-    }
-
-    return Text(
-      '$ping ms',
-      style: TextStyle(
-        fontSize: 12,
-        fontWeight:
-            FontWeight.bold,
-        color: ping < 100
-            ? Colors.greenAccent
-            : ping < 250
-                ? Colors.orangeAccent
-                : Colors.redAccent,
-      ),
-    );
-  }
-
-  // ---------------------------------------------------------------------------
-  // SETTINGS
-  // ---------------------------------------------------------------------------
-
-  Widget _settingsPage() {
-    return ListView(
-      padding:
-          const EdgeInsets.fromLTRB(
-        16,
-        16,
-        16,
-        100,
-      ),
-      children: [
-        const Text(
-          'تنظیمات',
-          style: TextStyle(
-            fontSize: 24,
-            fontWeight:
-                FontWeight.bold,
-          ),
-        ),
-
-        const SizedBox(height: 16),
-
-        _card(
-          child: Column(
+        card(
+          Column(
             crossAxisAlignment:
-                CrossAxisAlignment.start,
+                CrossAxisAlignment
+                    .start,
             children: [
               const Text(
-                'Subscription',
-                style: TextStyle(
+                'اطلاعات اشتراک',
+                style:
+                    TextStyle(
                   fontSize: 17,
                   fontWeight:
                       FontWeight.bold,
                 ),
               ),
-
-              const SizedBox(height: 12),
-
-              TextField(
-                controller:
-                    urlController,
-                textDirection:
-                    TextDirection.ltr,
-                decoration:
-                    InputDecoration(
-                  hintText:
-                      'https://...',
-                  filled: true,
-                  fillColor:
-                      Colors.black26,
-                  border:
-                      OutlineInputBorder(
-                    borderRadius:
-                        BorderRadius.circular(
-                      16,
-                    ),
-                    borderSide:
-                        BorderSide.none,
-                  ),
-                ),
+              const SizedBox(
+                height: 12,
               ),
-
-              const SizedBox(height: 12),
-
-              SizedBox(
-                width:
-                    double.infinity,
-                height: 52,
-                child:
-                    FilledButton.icon(
-                  onPressed:
-                      loading
-                          ? null
-                          : () =>
-                              loadSubscription(),
-                  icon: const Icon(
-                    Icons.sync_rounded,
-                  ),
-                  label: const Text(
-                    'بروزرسانی Subscription',
-                  ),
-                ),
+              Text(
+                'دانلود مصرف‌شده: ${size(downloadBytes)}',
+              ),
+              const SizedBox(
+                height: 6,
+              ),
+              Text(
+                'آپلود مصرف‌شده: ${size(uploadBytes)}',
+              ),
+              const SizedBox(
+                height: 6,
+              ),
+              Text(
+                'تاریخ انقضا: ${expireAt == null ? 'نامشخص' : _dateFromUnix(expireAt!)}',
+              ),
+              const SizedBox(
+                height: 6,
+              ),
+              Text(
+                'زمان باقی‌مانده: ${remainingTime()}',
               ),
             ],
           ),
         ),
-
-        _card(
-          child: Column(
-            children: [
-              SwitchListTile(
-                contentPadding:
-                    EdgeInsets.zero,
-                value: autoSelect,
-                onChanged:
-                    connected
-                        ? null
-                        : (value) {
-                            setState(() {
-                              autoSelect =
-                                  value;
-                            });
-                          },
-                title: const Text(
-                  'انتخاب خودکار سریع‌ترین سرور',
-                ),
-                subtitle:
-                    const Text(
-                  'sing-box با URLTest بهترین مسیر را انتخاب می‌کند.',
-                  style: TextStyle(
-                    color:
-                        Colors.white54,
-                  ),
-                ),
-              ),
-            ],
-          ),
-        ),
-
-        _card(
-          child: Column(
-            children: [
-              _settingRow(
-                Icons.dns_rounded,
-                'تعداد سرورها',
-                '${servers.length}',
-              ),
-              _settingRow(
-                Icons.sync_rounded,
-                'بروزرسانی خودکار',
-                'هر ۱۵ دقیقه',
-              ),
-              _settingRow(
-                Icons.cloud_download_rounded,
-                'دانلود اشتراک',
-                size(
-                  subscription.download,
-                ),
-              ),
-              _settingRow(
-                Icons.cloud_upload_rounded,
-                'آپلود اشتراک',
-                size(
-                  subscription.upload,
-                ),
-              ),
-              _settingRow(
-                Icons.data_usage_rounded,
-                'مصرف اشتراک',
-                size(
-                  subscription.used,
-                ),
-              ),
-              _settingRow(
-                Icons.event_rounded,
-                'زمان باقی‌مانده',
-                remainingTime(),
-              ),
-            ],
-          ),
-        ),
-
-        if (supportUrl != null &&
-            supportUrl!.isNotEmpty)
-          _card(
-            child: ListTile(
-              contentPadding:
-                  EdgeInsets.zero,
-              leading: const Icon(
-                Icons.support_agent_rounded,
-              ),
-              title: const Text(
-                'پشتیبانی Subscription',
-              ),
-              subtitle: Text(
-                supportUrl!,
-                maxLines: 1,
-                overflow:
-                    TextOverflow.ellipsis,
-              ),
-            ),
-          ),
       ],
     );
   }
 
-  Widget _settingRow(
-    IconData icon,
-    String title,
-    String value,
-  ) {
-    return Padding(
-      padding:
-          const EdgeInsets.symmetric(
-        vertical: 10,
-      ),
-      child: Row(
-        children: [
-          Icon(
-            icon,
-            size: 21,
-            color:
-                const Color(0xFF00D4FF),
-          ),
-          const SizedBox(width: 12),
-          Expanded(
-            child: Text(
-              title,
-              style: const TextStyle(
-                color: Colors.white70,
-              ),
-            ),
-          ),
-          Text(
-            value,
-            style: const TextStyle(
-              fontWeight:
-                  FontWeight.bold,
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  // ---------------------------------------------------------------------------
-  // TRAFFIC PAGE
-  // ---------------------------------------------------------------------------
-
-  Widget _trafficPage() {
-    final used =
-        subscription.used;
-
-    final total =
-        subscription.total;
-
-    final remaining =
-        subscription.remaining;
-
+  Widget _servers() {
     return ListView(
       padding:
-          const EdgeInsets.fromLTRB(
-        16,
-        16,
-        16,
-        100,
-      ),
+          const EdgeInsets.all(18),
       children: [
-        const Text(
-          'مصرف و ترافیک',
-          style: TextStyle(
-            fontSize: 24,
-            fontWeight:
-                FontWeight.bold,
+        header(
+          'سرورها',
+          '${servers.length} سرور',
+        ),
+
+        FilledButton.icon(
+          onPressed:
+              testing
+                  ? null
+                  : () => testAll(),
+          icon: const Icon(
+            Icons.speed,
+          ),
+          label: Text(
+            testing
+                ? 'در حال تست...'
+                : 'تست Ping',
           ),
         ),
 
-        const SizedBox(height: 16),
+        const SizedBox(
+          height: 14,
+        ),
 
-        _card(
-          child: Column(
-            children: [
-              const Text(
-                'مصرف Subscription',
-                style: TextStyle(
-                  fontSize: 18,
-                  fontWeight:
-                      FontWeight.bold,
-                ),
+        if (servers.isEmpty)
+          card(
+            const Padding(
+              padding:
+                  EdgeInsets.all(20),
+              child: Text(
+                'هنوز سروری دریافت نشده است.',
+                textAlign:
+                    TextAlign.center,
               ),
+            ),
+          ),
 
-              const SizedBox(height: 20),
+        ...servers
+            .asMap()
+            .entries
+            .map(
+              (entry) {
+                final index =
+                    entry.key;
+                final server =
+                    entry.value;
 
-              Row(
-                children: [
-                  _stat(
-                    'کل',
-                    size(total),
-                    Icons.data_usage,
+                return card(
+                  ListTile(
+                    contentPadding:
+                        EdgeInsets.zero,
+
+                    leading:
+                        CircleAvatar(
+                      child: Text(
+                        '${index + 1}',
+                      ),
+                    ),
+
+                    title: Text(
+                      server.name,
+                      maxLines: 1,
+                      overflow:
+                          TextOverflow
+                              .ellipsis,
+                    ),
+
+                    subtitle: Text(
+                      '${server.type} • ${server.host}:${server.port}',
+                      maxLines: 1,
+                      overflow:
+                          TextOverflow
+                              .ellipsis,
+                    ),
+
+                    trailing:
+                        Column(
+                      mainAxisAlignment:
+                          MainAxisAlignment
+                              .center,
+                      children: [
+                        Text(
+                          server.ping ==
+                                  null
+                              ? '---'
+                              : '${server.ping} ms',
+                          style:
+                              TextStyle(
+                            color: server
+                                        .ping ==
+                                    null
+                                ? Colors
+                                    .white38
+                                : server.ping! <
+                                        150
+                                    ? Colors
+                                        .greenAccent
+                                    : Colors
+                                        .orangeAccent,
+                          ),
+                        ),
+                      ],
+                    ),
                   ),
-                  const SizedBox(width: 10),
-                  _stat(
-                    'مصرف',
-                    size(used),
-                    Icons.pie_chart,
-                  ),
-                  const SizedBox(width: 10),
-                  _stat(
-                    'باقی',
-                    size(remaining),
-                    Icons.storage_rounded,
-                  ),
-                ],
-              ),
+                );
+              },
+            ),
+      ],
+    );
+  }
 
-              const SizedBox(height: 20),
+  Widget _traffic() {
+    return ListView(
+      padding:
+          const EdgeInsets.all(18),
+      children: [
+        header(
+          'ترافیک',
+          'آمار زنده VPN',
+        ),
 
-              _infoLine(
-                Icons.upload,
-                'آپلود حساب',
-                size(
-                  subscription.upload,
-                ),
-              ),
-
-              _infoLine(
-                Icons.download,
-                'دانلود حساب',
-                size(
-                  subscription.download,
-                ),
-              ),
-
-              _infoLine(
-                Icons.timer,
-                'انقضا',
-                remainingTime(),
-              ),
-            ],
+        card(
+          ListTile(
+            title:
+                const Text(
+              'دانلود',
+            ),
+            subtitle:
+                Text(download),
+            leading:
+                const Icon(
+              Icons.download,
+            ),
           ),
         ),
 
-        _card(
-          child: Column(
-            crossAxisAlignment:
-                CrossAxisAlignment.start,
-            children: [
-              const Text(
-                'جلسه فعلی VPN',
-                style: TextStyle(
-                  fontSize: 18,
-                  fontWeight:
-                      FontWeight.bold,
+        card(
+          ListTile(
+            title:
+                const Text(
+              'آپلود',
+            ),
+            subtitle:
+                Text(upload),
+            leading:
+                const Icon(
+              Icons.upload,
+            ),
+          ),
+        ),
+
+        card(
+          ListTile(
+            title:
+                const Text(
+              'حجم کل اشتراک',
+            ),
+            subtitle:
+                Text(
+              size(totalBytes),
+            ),
+            leading:
+                const Icon(
+              Icons.data_usage,
+            ),
+          ),
+        ),
+
+        card(
+          ListTile(
+            title:
+                const Text(
+              'مصرف کل اشتراک',
+            ),
+            subtitle:
+                Text(
+              size(usedBytes),
+            ),
+            leading:
+                const Icon(
+              Icons.storage,
+            ),
+          ),
+        ),
+
+        card(
+          ListTile(
+            title:
+                const Text(
+              'دانلود مصرف‌شده اشتراک',
+            ),
+            subtitle:
+                Text(
+              size(downloadBytes),
+            ),
+            leading:
+                const Icon(
+              Icons.download,
+            ),
+          ),
+        ),
+
+        card(
+          ListTile(
+            title:
+                const Text(
+              'آپلود مصرف‌شده اشتراک',
+            ),
+            subtitle:
+                Text(
+              size(uploadBytes),
+            ),
+            leading:
+                const Icon(
+              Icons.upload,
+            ),
+          ),
+        ),
+
+        card(
+          ListTile(
+            title:
+                const Text(
+              'حجم باقی‌مانده',
+            ),
+            subtitle:
+                Text(
+              size(
+                totalBytes ==
+                        null
+                    ? null
+                    : max(
+                        0,
+                        totalBytes! -
+                            (usedBytes ??
+                                0),
+                      ),
                 ),
               ),
+            leading:
+                const Icon(
+              Icons.storage,
+            ),
+          ),
+        ),
 
-              const SizedBox(height: 16),
+        card(
+          ListTile(
+            title:
+                const Text(
+              'تاریخ انقضا',
+            ),
+            subtitle:
+                Text(
+              expireAt == null
+                  ? 'نامشخص'
+                  : _dateFromUnix(
+                      expireAt!,
+                    ),
+            ),
+            leading:
+                const Icon(
+              Icons.event,
+            ),
+          ),
+        ),
 
-              _infoLine(
-                Icons.download_done,
-                'دانلود',
-                size(
-                  sessionDownload,
-                ),
+        card(
+          ListTile(
+            title:
+                const Text(
+              'زمان باقی‌مانده',
+            ),
+            subtitle:
+                Text(
+              remainingTime(),
+            ),
+            leading:
+                const Icon(
+              Icons.timer,
+            ),
+          ),
+        ),
+
+        card(
+          ListTile(
+            title:
+                const Text(
+              'دانلود این اتصال',
+            ),
+            subtitle:
+                Text(
+              size(
+                downloadTotalBytes,
               ),
+            ),
+            leading:
+                const Icon(
+              Icons.download_done,
+            ),
+          ),
+        ),
 
-              _infoLine(
-                Icons.upload_file,
-                'آپلود',
-                size(
-                  sessionUpload,
-                ),
+        card(
+          ListTile(
+            title:
+                const Text(
+              'آپلود این اتصال',
+            ),
+            subtitle:
+                Text(
+              size(
+                uploadTotalBytes,
               ),
-
-              _infoLine(
-                Icons.download_rounded,
-                'سرعت دانلود',
-                speed(
-                  downloadSpeed,
-                ),
-              ),
-
-              _infoLine(
-                Icons.upload_rounded,
-                'سرعت آپلود',
-                speed(
-                  uploadSpeed,
-                ),
-              ),
-            ],
+            ),
+            leading:
+                const Icon(
+              Icons.upload_file,
+            ),
           ),
         ),
       ],
     );
   }
 
-  // ---------------------------------------------------------------------------
-  // BUILD
-  // ---------------------------------------------------------------------------
+  Widget _subscription() {
+    return ListView(
+      padding:
+          const EdgeInsets.all(18),
+      children: [
+        header(
+          'Subscription',
+          'مدیریت اشتراک',
+        ),
+
+        TextField(
+          controller: url,
+          textDirection:
+              TextDirection.ltr,
+          maxLines: 2,
+          decoration:
+              const InputDecoration(
+            labelText:
+                'Subscription URL',
+            hintText:
+                'https://...',
+            prefixIcon:
+                Icon(Icons.link),
+          ),
+        ),
+
+        const SizedBox(
+          height: 12,
+        ),
+
+        FilledButton.icon(
+          onPressed:
+              loading
+                  ? null
+                  : () =>
+                      loadSubscription(),
+          icon: const Icon(
+            Icons.refresh,
+          ),
+          label: Text(
+            loading
+                ? 'در حال دریافت...'
+                : 'بروزرسانی',
+          ),
+        ),
+
+        const SizedBox(
+          height: 18,
+        ),
+
+        card(
+          const ListTile(
+            contentPadding:
+                EdgeInsets.zero,
+            leading: Icon(
+              Icons.sync,
+            ),
+            title: Text(
+              'بروزرسانی خودکار',
+            ),
+            subtitle: Text(
+              'هر ۱۵ دقیقه، در صورت قطع بودن VPN',
+            ),
+          ),
+        ),
+
+        card(
+          ListTile(
+            contentPadding:
+                EdgeInsets.zero,
+            leading: const Icon(
+              Icons.dns,
+            ),
+            title: const Text(
+              'تعداد سرورها',
+            ),
+            subtitle:
+                Text(
+              '${servers.length}',
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _settings() {
+    return ListView(
+      padding:
+          const EdgeInsets.all(18),
+      children: [
+        header(
+          'تنظیمات',
+          'Light speed 🔥',
+        ),
+
+        card(
+          const ListTile(
+            leading:
+                Icon(Icons.flash_on),
+            title: Text(
+              'انتخاب سریع‌ترین سرور',
+            ),
+            subtitle: Text(
+              'ابتدا Ping سرورها بررسی می‌شود و سپس سریع‌ترین سرور برای اتصال انتخاب می‌شود.',
+            ),
+          ),
+        ),
+
+        card(
+          const ListTile(
+            leading:
+                Icon(Icons.sync),
+            title: Text(
+              'Auto Refresh',
+            ),
+            subtitle: Text(
+              'Subscription هر ۱۵ دقیقه بروزرسانی می‌شود.',
+            ),
+          ),
+        ),
+
+        card(
+          ListTile(
+            leading:
+                const Icon(
+              Icons.shield,
+            ),
+            title:
+                const Text(
+              'VPN Engine',
+            ),
+            subtitle:
+                Text(
+              'sing-box / Android VpnService\n$stateText',
+            ),
+          ),
+        ),
+
+        card(
+          const ListTile(
+            leading:
+                Icon(Icons.info),
+            title:
+                Text(
+              'Light speed 🔥',
+            ),
+            subtitle:
+                Text(
+              'Real VPN Client',
+            ),
+          ),
+        ),
+      ],
+    );
+  }
 
   @override
-  Widget build(BuildContext context) {
-    final pages = [
-      _homePage(),
-      _serversPage(),
-      _trafficPage(),
-      _settingsPage(),
-    ];
+  void dispose() {
+    stateSub?.cancel();
+    trafficSub?.cancel();
+    timer?.cancel();
+    url.dispose();
 
-    return Scaffold(
-      body: SafeArea(
-        child: pages[page],
-      ),
-      bottomNavigationBar:
-          NavigationBar(
-        selectedIndex: page,
-        onDestinationSelected:
-            (index) {
-          setState(() {
-            page = index;
-          });
-        },
-        backgroundColor:
-            const Color(0xFF08111E),
-        indicatorColor:
-            const Color(0xFF00D4FF)
-                .withValues(
-          alpha: .18,
-        ),
-        destinations: const [
-          NavigationDestination(
-            icon: Icon(
-              Icons.home_outlined,
-            ),
-            selectedIcon: Icon(
-              Icons.home_rounded,
-            ),
-            label: 'خانه',
-          ),
-          NavigationDestination(
-            icon: Icon(
-              Icons.dns_outlined,
-            ),
-            selectedIcon: Icon(
-              Icons.dns_rounded,
-            ),
-            label: 'سرورها',
-          ),
-          NavigationDestination(
-            icon: Icon(
-              Icons.data_usage_outlined,
-            ),
-            selectedIcon: Icon(
-              Icons.data_usage_rounded,
-            ),
-            label: 'ترافیک',
-          ),
-          NavigationDestination(
-            icon: Icon(
-              Icons.settings_outlined,
-            ),
-            selectedIcon: Icon(
-              Icons.settings_rounded,
-            ),
-            label: 'تنظیمات',
-          ),
-        ],
-      ),
-    );
+    super.dispose();
   }
 }
