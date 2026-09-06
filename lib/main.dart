@@ -78,9 +78,9 @@ class HomePage extends StatefulWidget {
 }
 
 class _HomePageState extends State<HomePage> {
-  final url = TextEditingController();
+  final TextEditingController url = TextEditingController();
 
-  final servers = <Server>[];
+  final List<Server> servers = [];
 
   StreamSubscription? stateSub;
   StreamSubscription? trafficSub;
@@ -97,7 +97,7 @@ class _HomePageState extends State<HomePage> {
   bool connecting = false;
 
   String stateText = 'آماده اتصال';
-  String errorText = '';
+  String lastVpnError = '';
 
   String download = '0 Mbps';
   String upload = '0 Mbps';
@@ -113,35 +113,61 @@ class _HomePageState extends State<HomePage> {
   void initState() {
     super.initState();
 
-    stateSub = vpn.serviceStateStream.listen((s) {
+    _listenVpn();
+
+    refreshTimer = Timer.periodic(
+      const Duration(minutes: 15),
+      (_) {
+        if (!connected && !connecting) {
+          loadSubscription(silent: true);
+        }
+      },
+    );
+
+    clockTimer = Timer.periodic(
+      const Duration(minutes: 1),
+      (_) {
+        if (mounted) {
+          setState(() {});
+        }
+      },
+    );
+
+    loadSaved();
+  }
+
+  void _listenVpn() {
+    stateSub = vpn.serviceStateStream.listen((state) {
       if (!mounted) return;
 
-      final text = s.toString();
-      final low = text.toLowerCase();
+      final text = state.toString();
+      final lower = text.toLowerCase();
 
       setState(() {
-        stateText = text;
-
-        if (low.contains('running') ||
-            low.contains('started') ||
-            low.contains('connected')) {
+        if (lower.contains('running') ||
+            lower.contains('started') ||
+            lower.contains('connected')) {
           connected = true;
           connecting = false;
         }
 
-        if (low.contains('stopped') ||
-            low.contains('disconnected')) {
+        if (lower.contains('stopped') ||
+            lower.contains('disconnected')) {
           connected = false;
           connecting = false;
+        }
+
+        if (lower.isNotEmpty) {
+          stateText = text;
         }
       });
     });
 
-    trafficSub = vpn.trafficStatsStream.listen((s) {
+    trafficSub = vpn.trafficStatsStream.listen((stats) {
       if (!mounted) return;
 
       try {
-        final dynamic x = s;
+        final dynamic x = stats;
 
         final dynamic downBps = x.downlinkBps;
         final dynamic upBps = x.uplinkBps;
@@ -168,7 +194,6 @@ class _HomePageState extends State<HomePage> {
         setState(() {
           download = speed(downBps);
           upload = speed(upBps);
-
           downloadTotalBytes = downTotal;
           uploadTotalBytes = upTotal;
         });
@@ -178,46 +203,27 @@ class _HomePageState extends State<HomePage> {
     faultSub = vpn.faultStream.listen((error) {
       if (!mounted) return;
 
-      final text = error.toString().trim();
-
-      if (text.isEmpty) return;
+      final message = error.toString().trim();
 
       setState(() {
-        stateText = 'خطای VPN';
-        errorText = text;
         connected = false;
         connecting = false;
+        lastVpnError = message;
+        stateText = 'خطای VPN';
       });
 
-      snack('خطای VPN: $text');
+      if (message.isNotEmpty) {
+        snack('خطای VPN: $message');
+      }
     });
-
-    refreshTimer = Timer.periodic(
-      const Duration(minutes: 15),
-      (_) {
-        if (!connected && !connecting) {
-          loadSubscription(silent: true);
-        }
-      },
-    );
-
-    clockTimer = Timer.periodic(
-      const Duration(minutes: 1),
-      (_) {
-        if (mounted) {
-          setState(() {});
-        }
-      },
-    );
-
-    loadSaved();
   }
 
   Future<void> loadSaved() async {
     try {
-      final p = await SharedPreferences.getInstance();
+      final prefs = await SharedPreferences.getInstance();
 
-      final saved = p.getString('subscription_url');
+      final saved =
+          prefs.getString('subscription_url');
 
       if (saved == null || saved.isEmpty) {
         return;
@@ -232,10 +238,13 @@ class _HomePageState extends State<HomePage> {
   Future<void> loadSubscription({
     bool silent = false,
   }) async {
-    if (url.text.trim().isEmpty) {
+    final address = url.text.trim();
+
+    if (address.isEmpty) {
       if (!silent && mounted) {
         setState(() {
-          stateText = 'Subscription URL را وارد کن';
+          stateText =
+              'Subscription URL را وارد کن';
         });
       }
 
@@ -245,10 +254,10 @@ class _HomePageState extends State<HomePage> {
     if (mounted) {
       setState(() {
         loading = true;
-        errorText = '';
 
         if (!silent) {
-          stateText = 'در حال دریافت سرورها...';
+          stateText =
+              'در حال دریافت Subscription...';
         }
       });
     }
@@ -256,7 +265,7 @@ class _HomePageState extends State<HomePage> {
     try {
       final response = await http
           .get(
-            Uri.parse(url.text.trim()),
+            Uri.parse(address),
             headers: const {
               'User-Agent': 'LightSpeed/2.0',
               'Accept': '*/*',
@@ -292,11 +301,12 @@ class _HomePageState extends State<HomePage> {
         }
       }
 
-      final p = await SharedPreferences.getInstance();
+      final prefs =
+          await SharedPreferences.getInstance();
 
-      await p.setString(
+      await prefs.setString(
         'subscription_url',
-        url.text.trim(),
+        address,
       );
 
       if (!mounted) return;
@@ -307,6 +317,8 @@ class _HomePageState extends State<HomePage> {
           ..addAll(result);
 
         loading = false;
+
+        lastVpnError = '';
 
         stateText = result.isEmpty
             ? 'هیچ سروری پیدا نشد'
@@ -319,13 +331,13 @@ class _HomePageState extends State<HomePage> {
 
       setState(() {
         loading = false;
-        stateText = 'خطا در دریافت Subscription';
-        errorText = e.toString();
+        stateText =
+            'خطا در دریافت Subscription';
       });
 
       if (!silent) {
         snack(
-          'دریافت Subscription ناموفق بود',
+          'دریافت Subscription ناموفق بود: $e',
         );
       }
     }
@@ -350,8 +362,13 @@ class _HomePageState extends State<HomePage> {
       final parts = item.trim().split('=');
 
       if (parts.length == 2) {
-        values[parts[0]] =
-            int.tryParse(parts[1]) ?? 0;
+        final key = parts[0].trim();
+        final value =
+            int.tryParse(parts[1].trim());
+
+        if (value != null) {
+          values[key] = value;
+        }
       }
     }
 
@@ -369,14 +386,18 @@ class _HomePageState extends State<HomePage> {
   }
 
   List<String> decodeSubscription(String body) {
-    final direct = body
+    final lines = body
         .split(RegExp(r'\r?\n'))
-        .map((x) => x.trim())
-        .where((x) => x.contains('://'))
+        .map((line) => line.trim())
+        .where(
+          (line) =>
+              line.isNotEmpty &&
+              line.contains('://'),
+        )
         .toList();
 
-    if (direct.isNotEmpty) {
-      return direct;
+    if (lines.isNotEmpty) {
+      return lines;
     }
 
     try {
@@ -398,8 +419,12 @@ class _HomePageState extends State<HomePage> {
 
       return decoded
           .split(RegExp(r'\r?\n'))
-          .map((x) => x.trim())
-          .where((x) => x.contains('://'))
+          .map((line) => line.trim())
+          .where(
+            (line) =>
+                line.isNotEmpty &&
+                line.contains('://'),
+          )
           .toList();
     } catch (_) {
       return [];
@@ -410,7 +435,8 @@ class _HomePageState extends State<HomePage> {
     try {
       final uri = Uri.parse(raw);
 
-      final scheme = uri.scheme.toLowerCase();
+      final scheme =
+          uri.scheme.toLowerCase();
 
       if (scheme == 'vmess') {
         return parseVmess(raw);
@@ -426,7 +452,9 @@ class _HomePageState extends State<HomePage> {
         return null;
       }
 
-      if (uri.host.isEmpty || !uri.hasPort) {
+      if (uri.host.isEmpty ||
+          !uri.hasPort ||
+          uri.port <= 0) {
         return null;
       }
 
@@ -438,14 +466,22 @@ class _HomePageState extends State<HomePage> {
 
       late Map<String, dynamic> outbound;
 
-      if (scheme == 'vless') {
-        outbound = vless(uri);
-      } else if (scheme == 'trojan') {
-        outbound = trojan(uri);
-      } else if (scheme == 'ss') {
-        outbound = shadowsocks(uri, raw) ?? {};
-      } else {
-        outbound = hysteria2(uri);
+      switch (scheme) {
+        case 'vless':
+          outbound = vless(uri);
+          break;
+
+        case 'trojan':
+          outbound = trojan(uri);
+          break;
+
+        case 'ss':
+          outbound =
+              shadowsocks(uri, raw) ?? {};
+          break;
+
+        default:
+          outbound = hysteria2(uri);
       }
 
       if (outbound.isEmpty) {
@@ -483,17 +519,21 @@ class _HomePageState extends State<HomePage> {
       );
 
       final map =
-          json.decode(decoded) as Map<String, dynamic>;
+          json.decode(decoded)
+              as Map<String, dynamic>;
 
       final host = '${map['add'] ?? ''}';
 
       final port =
-          int.tryParse('${map['port'] ?? ''}') ?? 0;
+          int.tryParse(
+                '${map['port'] ?? ''}',
+              ) ??
+              0;
 
       final uuid = '${map['id'] ?? ''}';
 
       if (host.isEmpty ||
-          port == 0 ||
+          port <= 0 ||
           uuid.isEmpty) {
         return null;
       }
@@ -505,10 +545,13 @@ class _HomePageState extends State<HomePage> {
         'server': host,
         'server_port': port,
         'uuid': uuid,
-        'security': '${map['scy'] ?? 'auto'}',
+        'security':
+            '${map['scy'] ?? 'auto'}',
       };
 
-      final tls = '${map['tls'] ?? ''}';
+      final tls =
+          '${map['tls'] ?? ''}'
+              .toLowerCase();
 
       final sni =
           '${map['sni'] ?? map['host'] ?? ''}';
@@ -530,7 +573,7 @@ class _HomePageState extends State<HomePage> {
 
       return Server(
         raw: raw,
-        name: map['ps']?.toString() ?? 'VMess',
+        name: map['ps'] ?? 'VMess',
         type: 'VMESS',
         host: host,
         port: port,
@@ -553,12 +596,15 @@ class _HomePageState extends State<HomePage> {
       'uuid': uri.userInfo,
     };
 
-    if ((p['flow'] ?? '').isNotEmpty) {
-      outbound['flow'] = p['flow'];
+    final flow = p['flow'] ?? '';
+
+    if (flow.isNotEmpty) {
+      outbound['flow'] = flow;
     }
 
     final security =
-        (p['security'] ?? '').toLowerCase();
+        (p['security'] ?? '')
+            .toLowerCase();
 
     if (security == 'tls' ||
         security == 'reality') {
@@ -571,21 +617,26 @@ class _HomePageState extends State<HomePage> {
             uri.host,
       };
 
-      if ((p['fp'] ?? '').isNotEmpty) {
+      final fingerprint = p['fp'] ?? '';
+
+      if (fingerprint.isNotEmpty) {
         tls['utls'] = {
           'enabled': true,
-          'fingerprint': p['fp'],
+          'fingerprint': fingerprint,
         };
       }
 
-      if (security == 'reality' &&
-          (p['pbk'] ?? '').isNotEmpty) {
-        tls['reality'] = {
-          'enabled': true,
-          'public_key': p['pbk'],
-          if ((p['sid'] ?? '').isNotEmpty)
-            'short_id': p['sid'],
-        };
+      if (security == 'reality') {
+        final publicKey = p['pbk'] ?? '';
+
+        if (publicKey.isNotEmpty) {
+          tls['reality'] = {
+            'enabled': true,
+            'public_key': publicKey,
+            if ((p['sid'] ?? '').isNotEmpty)
+              'short_id': p['sid'],
+          };
+        }
       }
 
       outbound['tls'] = tls;
@@ -666,17 +717,28 @@ class _HomePageState extends State<HomePage> {
         return null;
       }
 
+      final method =
+          Uri.decodeComponent(
+        user.substring(0, colon),
+      );
+
+      final password =
+          Uri.decodeComponent(
+        user.substring(colon + 1),
+      );
+
+      if (method.isEmpty ||
+          password.isEmpty) {
+        return null;
+      }
+
       return {
         'type': 'shadowsocks',
         'tag': 'proxy',
         'server': uri.host,
         'server_port': uri.port,
-        'method': Uri.decodeComponent(
-          user.substring(0, colon),
-        ),
-        'password': Uri.decodeComponent(
-          user.substring(colon + 1),
-        ),
+        'method': method,
+        'password': password,
       };
     } catch (_) {
       return null;
@@ -710,33 +772,47 @@ class _HomePageState extends State<HomePage> {
     String path,
     String host,
   ) {
-    final n = network.toLowerCase();
+    final n =
+        network.toLowerCase().trim();
 
-    if (n == 'ws' || n == 'websocket') {
+    if (n == 'ws' ||
+        n == 'websocket') {
       outbound['transport'] = {
         'type': 'ws',
-        'path': path.isEmpty ? '/' : path,
+        'path':
+            path.isEmpty ? '/' : path,
         if (host.isNotEmpty)
           'headers': {
             'Host': host,
           },
       };
-    } else if (n == 'grpc') {
+      return;
+    }
+
+    if (n == 'grpc') {
       outbound['transport'] = {
         'type': 'grpc',
         'service_name': path,
       };
-    } else if (n == 'httpupgrade') {
+      return;
+    }
+
+    if (n == 'httpupgrade') {
       outbound['transport'] = {
         'type': 'httpupgrade',
-        'path': path.isEmpty ? '/' : path,
+        'path':
+            path.isEmpty ? '/' : path,
         if (host.isNotEmpty)
           'host': host,
       };
-    } else if (n == 'h2' || n == 'http') {
+      return;
+    }
+
+    if (n == 'h2' || n == 'http') {
       outbound['transport'] = {
         'type': 'http',
-        'path': path.isEmpty ? '/' : path,
+        'path':
+            path.isEmpty ? '/' : path,
         if (host.isNotEmpty)
           'host': [host],
       };
@@ -768,6 +844,11 @@ class _HomePageState extends State<HomePage> {
             'server': '1.1.1.1',
             'server_port': 443,
             'path': '/dns-query',
+            'tls': {
+              'enabled': true,
+              'server_name':
+                  'cloudflare-dns.com',
+            },
             'detour': 'direct',
           },
         ],
@@ -778,20 +859,27 @@ class _HomePageState extends State<HomePage> {
         {
           'type': 'tun',
           'tag': 'tun-in',
+
           'address': [
             '172.19.0.1/30',
           ],
+
           'auto_route': true,
+
           'stack': 'mixed',
+
+          'mtu': 1500,
         },
       ],
 
       'outbounds': [
         outbound,
+
         {
           'type': 'direct',
           'tag': 'direct',
         },
+
         {
           'type': 'block',
           'tag': 'block',
@@ -800,6 +888,7 @@ class _HomePageState extends State<HomePage> {
 
       'route': {
         'auto_detect_interface': true,
+
         'override_android_vpn': true,
 
         'rules': [
@@ -817,7 +906,7 @@ class _HomePageState extends State<HomePage> {
   Future<void> testAll({
     bool silent = false,
   }) async {
-    if (servers.isEmpty || testing) {
+    if (servers.isEmpty) {
       return;
     }
 
@@ -826,22 +915,19 @@ class _HomePageState extends State<HomePage> {
         testing = true;
         stateText = 'در حال تست Ping...';
       });
-    } else {
-      testing = true;
     }
 
     for (final server in servers) {
-      if (!mounted && !silent) {
-        break;
-      }
-
-      final stopwatch = Stopwatch()..start();
+      final stopwatch =
+          Stopwatch()..start();
 
       try {
-        final socket = await Socket.connect(
+        final socket =
+            await Socket.connect(
           server.host,
           server.port,
-          timeout: const Duration(seconds: 3),
+          timeout:
+              const Duration(seconds: 3),
         );
 
         socket.destroy();
@@ -858,7 +944,8 @@ class _HomePageState extends State<HomePage> {
     }
 
     servers.sort((a, b) {
-      if (a.ping == null && b.ping == null) {
+      if (a.ping == null &&
+          b.ping == null) {
         return 0;
       }
 
@@ -870,15 +957,18 @@ class _HomePageState extends State<HomePage> {
         return -1;
       }
 
-      return a.ping!.compareTo(b.ping!);
+      return a.ping!.compareTo(
+        b.ping!,
+      );
     });
-
-    testing = false;
 
     if (mounted) {
       setState(() {
+        testing = false;
+
         if (!silent) {
-          stateText = 'سرورها مرتب شدند';
+          stateText =
+              'سرورها بر اساس Ping مرتب شدند';
         }
       });
     }
@@ -887,7 +977,8 @@ class _HomePageState extends State<HomePage> {
   Server? fastest() {
     final good = servers
         .where(
-          (server) => server.ping != null,
+          (server) =>
+              server.ping != null,
         )
         .toList();
 
@@ -896,7 +987,8 @@ class _HomePageState extends State<HomePage> {
     }
 
     good.sort(
-      (a, b) => a.ping!.compareTo(b.ping!),
+      (a, b) =>
+          a.ping!.compareTo(b.ping!),
     );
 
     return good.first;
@@ -922,7 +1014,7 @@ class _HomePageState extends State<HomePage> {
     if (mounted) {
       setState(() {
         connecting = true;
-        errorText = '';
+        lastVpnError = '';
         stateText =
             'در حال انتخاب سریع‌ترین سرور...';
       });
@@ -945,6 +1037,10 @@ class _HomePageState extends State<HomePage> {
         });
       }
 
+      snack(
+        'هیچ سرور قابل دسترسی پیدا نشد',
+      );
+
       return;
     }
 
@@ -961,23 +1057,27 @@ class _HomePageState extends State<HomePage> {
 
       if (!permission) {
         throw Exception(
-          'اجازه VPN داده نشد',
+          'مجوز VPN توسط کاربر تأیید نشد',
         );
       }
 
-      final config = makeConfig(best);
+      final config =
+          makeConfig(best);
 
       await vpn.checkConfig(config);
 
       await vpn.connect(
         SessionOptions(
           config: config,
-          networkMode: NetworkMode.vpn,
-          notification: NotificationConfig(
+          networkMode:
+              NetworkMode.vpn,
+          notification:
+              NotificationConfig(
             title: 'Light speed 🔥',
             showTrafficStats: true,
             showStopButton: true,
-            stopButtonLabel: 'قطع اتصال',
+            stopButtonLabel:
+                'قطع اتصال',
           ),
         ),
       );
@@ -994,21 +1094,29 @@ class _HomePageState extends State<HomePage> {
         download = '0 Mbps';
         upload = '0 Mbps';
 
+        lastVpnError = '';
+
         stateText =
             'متصل • ${best.name}';
       });
     } catch (e) {
       if (!mounted) return;
 
+      final error =
+          e.toString().trim();
+
       setState(() {
         connecting = false;
         connected = false;
-        stateText = 'اتصال ناموفق';
-        errorText = e.toString();
+
+        lastVpnError = error;
+
+        stateText =
+            'اتصال ناموفق';
       });
 
       snack(
-        'خطای VPN: $e',
+        'اتصال VPN ناموفق بود:\n$error',
       );
     }
   }
@@ -1016,7 +1124,13 @@ class _HomePageState extends State<HomePage> {
   Future<void> disconnect() async {
     try {
       await vpn.disconnect();
-    } catch (_) {}
+    } catch (e) {
+      if (mounted) {
+        snack(
+          'خطا هنگام قطع اتصال: $e',
+        );
+      }
+    }
 
     if (mounted) {
       setState(() {
@@ -1036,7 +1150,9 @@ class _HomePageState extends State<HomePage> {
 
   String speed(dynamic bps) {
     final n =
-        bps is num ? bps.toDouble() : 0.0;
+        bps is num
+            ? bps.toDouble()
+            : 0.0;
 
     if (n <= 0) {
       return '0 Mbps';
@@ -1070,7 +1186,8 @@ class _HomePageState extends State<HomePage> {
       'TB',
     ];
 
-    double value = bytes.toDouble();
+    double value =
+        bytes.toDouble();
 
     int index = 0;
 
@@ -1084,22 +1201,25 @@ class _HomePageState extends State<HomePage> {
   }
 
   String remainingTime() {
-    if (expireAt == null || expireAt! <= 0) {
+    if (expireAt == null ||
+        expireAt! <= 0) {
       return 'نامشخص';
     }
 
     final now =
         DateTime.now()
-            .millisecondsSinceEpoch ~/
-        1000;
+                .millisecondsSinceEpoch ~/
+            1000;
 
-    final seconds = expireAt! - now;
+    final seconds =
+        expireAt! - now;
 
     if (seconds <= 0) {
       return 'منقضی شده';
     }
 
-    final days = seconds ~/ 86400;
+    final days =
+        seconds ~/ 86400;
 
     final hours =
         (seconds % 86400) ~/ 3600;
@@ -1119,7 +1239,8 @@ class _HomePageState extends State<HomePage> {
   }
 
   String expiryDate() {
-    if (expireAt == null || expireAt! <= 0) {
+    if (expireAt == null ||
+        expireAt! <= 0) {
       return 'نامشخص';
     }
 
@@ -1129,19 +1250,34 @@ class _HomePageState extends State<HomePage> {
     );
 
     final year =
-        date.year.toString().padLeft(4, '0');
+        date.year.toString().padLeft(
+              4,
+              '0',
+            );
 
     final month =
-        date.month.toString().padLeft(2, '0');
+        date.month.toString().padLeft(
+              2,
+              '0',
+            );
 
     final day =
-        date.day.toString().padLeft(2, '0');
+        date.day.toString().padLeft(
+              2,
+              '0',
+            );
 
     final hour =
-        date.hour.toString().padLeft(2, '0');
+        date.hour.toString().padLeft(
+              2,
+              '0',
+            );
 
     final minute =
-        date.minute.toString().padLeft(2, '0');
+        date.minute.toString().padLeft(
+              2,
+              '0',
+            );
 
     return '$year/$month/$day - $hour:$minute';
   }
@@ -1153,10 +1289,15 @@ class _HomePageState extends State<HomePage> {
     }
 
     final percent =
-        ((usedBytes ?? 0) / totalBytes!) * 100;
+        ((usedBytes ?? 0) /
+                totalBytes!) *
+            100;
 
     final value =
-        percent.clamp(0.0, 100.0);
+        percent.clamp(
+      0.0,
+      100.0,
+    );
 
     return '${value.toStringAsFixed(1)}٪';
   }
@@ -1164,15 +1305,21 @@ class _HomePageState extends State<HomePage> {
   void snack(String text) {
     if (!mounted) return;
 
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Text(
-          text,
-          textDirection: TextDirection.rtl,
+    ScaffoldMessenger.of(context)
+      ..hideCurrentSnackBar()
+      ..showSnackBar(
+        SnackBar(
+          content: Text(
+            text,
+            textDirection:
+                TextDirection.rtl,
+          ),
+          behavior:
+              SnackBarBehavior.floating,
+          duration:
+              const Duration(seconds: 4),
         ),
-        behavior: SnackBarBehavior.floating,
-      ),
-    );
+      );
   }
 
   @override
@@ -1186,27 +1333,38 @@ class _HomePageState extends State<HomePage> {
     ];
 
     return Directionality(
-      textDirection: TextDirection.rtl,
+      textDirection:
+          TextDirection.rtl,
       child: Scaffold(
         body: SafeArea(
           child: pages[page],
         ),
-        bottomNavigationBar: NavigationBar(
+        bottomNavigationBar:
+            NavigationBar(
           selectedIndex: page,
-          onDestinationSelected: (index) {
+          onDestinationSelected:
+              (index) {
             setState(() {
               page = index;
             });
           },
           destinations: const [
             NavigationDestination(
-              icon: Icon(Icons.home_outlined),
-              selectedIcon: Icon(Icons.home),
+              icon: Icon(
+                Icons.home_outlined,
+              ),
+              selectedIcon: Icon(
+                Icons.home,
+              ),
               label: 'خانه',
             ),
             NavigationDestination(
-              icon: Icon(Icons.dns_outlined),
-              selectedIcon: Icon(Icons.dns),
+              icon: Icon(
+                Icons.dns_outlined,
+              ),
+              selectedIcon: Icon(
+                Icons.dns,
+              ),
               label: 'سرورها',
             ),
             NavigationDestination(
@@ -1219,8 +1377,12 @@ class _HomePageState extends State<HomePage> {
               label: 'ترافیک',
             ),
             NavigationDestination(
-              icon: Icon(Icons.link_outlined),
-              selectedIcon: Icon(Icons.link),
+              icon: Icon(
+                Icons.link_outlined,
+              ),
+              selectedIcon: Icon(
+                Icons.link,
+              ),
               label: 'اشتراک',
             ),
             NavigationDestination(
@@ -1243,7 +1405,8 @@ class _HomePageState extends State<HomePage> {
     String subtitle,
   ) {
     return Padding(
-      padding: const EdgeInsets.only(
+      padding:
+          const EdgeInsets.only(
         bottom: 18,
       ),
       child: Row(
@@ -1251,9 +1414,11 @@ class _HomePageState extends State<HomePage> {
           Container(
             width: 48,
             height: 48,
-            decoration: const BoxDecoration(
+            decoration:
+                const BoxDecoration(
               shape: BoxShape.circle,
-              gradient: LinearGradient(
+              gradient:
+                  LinearGradient(
                 colors: [
                   Color(0xFF00E5FF),
                   Color(0xFF7C4DFF),
@@ -1266,24 +1431,33 @@ class _HomePageState extends State<HomePage> {
               size: 28,
             ),
           ),
-          const SizedBox(width: 12),
+          const SizedBox(
+            width: 12,
+          ),
           Expanded(
             child: Column(
               crossAxisAlignment:
-                  CrossAxisAlignment.start,
+                  CrossAxisAlignment
+                      .start,
               children: [
                 Text(
                   title,
-                  style: const TextStyle(
+                  style:
+                      const TextStyle(
                     fontSize: 22,
-                    fontWeight: FontWeight.w800,
+                    fontWeight:
+                        FontWeight.w800,
                   ),
                 ),
-                const SizedBox(height: 3),
+                const SizedBox(
+                  height: 3,
+                ),
                 Text(
                   subtitle,
-                  style: const TextStyle(
-                    color: Colors.white54,
+                  style:
+                      const TextStyle(
+                    color:
+                        Colors.white54,
                   ),
                 ),
               ],
@@ -1296,16 +1470,21 @@ class _HomePageState extends State<HomePage> {
 
   Widget card(Widget child) {
     return Container(
-      margin: const EdgeInsets.only(
+      margin:
+          const EdgeInsets.only(
         bottom: 12,
       ),
-      padding: const EdgeInsets.all(16),
-      decoration: BoxDecoration(
-        color: const Color(0xFF0D1728),
+      padding:
+          const EdgeInsets.all(16),
+      decoration:
+          BoxDecoration(
+        color:
+            const Color(0xFF0D1728),
         borderRadius:
             BorderRadius.circular(22),
         border: Border.all(
-          color: Colors.white.withValues(
+          color:
+              Colors.white.withValues(
             alpha: .05,
           ),
         ),
@@ -1323,35 +1502,55 @@ class _HomePageState extends State<HomePage> {
             ? 0.0
             : ((usedBytes ?? 0) /
                     totalBytes!)
-                .clamp(0.0, 1.0);
+                .clamp(
+                    0.0,
+                    1.0,
+                  );
 
     return ListView(
-      padding: const EdgeInsets.all(18),
+      padding:
+          const EdgeInsets.all(18),
       children: [
         header(
           'Light speed 🔥',
           'VPN واقعی با sing-box',
         ),
 
-        const SizedBox(height: 8),
+        const SizedBox(
+          height: 8,
+        ),
 
         Center(
           child: GestureDetector(
-            onTap: connecting ? null : connect,
+            onTap:
+                connecting
+                    ? null
+                    : connect,
             child: Container(
               width: 200,
               height: 200,
-              decoration: BoxDecoration(
-                shape: BoxShape.circle,
-                gradient: LinearGradient(
+              decoration:
+                  BoxDecoration(
+                shape:
+                    BoxShape.circle,
+                gradient:
+                    LinearGradient(
                   colors: connected
                       ? const [
-                          Color(0xFF00E676),
-                          Color(0xFF00B8D4),
+                          Color(
+                            0xFF00E676,
+                          ),
+                          Color(
+                            0xFF00B8D4,
+                          ),
                         ]
                       : const [
-                          Color(0xFF00E5FF),
-                          Color(0xFF7C4DFF),
+                          Color(
+                            0xFF00E5FF,
+                          ),
+                          Color(
+                            0xFF7C4DFF,
+                          ),
                         ],
                 ),
                 boxShadow: [
@@ -1377,8 +1576,10 @@ class _HomePageState extends State<HomePage> {
                   height: 176,
                   decoration:
                       const BoxDecoration(
-                    shape: BoxShape.circle,
-                    color: Color(0xFF081322),
+                    shape:
+                        BoxShape.circle,
+                    color:
+                        Color(0xFF081322),
                   ),
                   child: Center(
                     child: connecting
@@ -1390,8 +1591,10 @@ class _HomePageState extends State<HomePage> {
                             children: [
                               Icon(
                                 connected
-                                    ? Icons.power
-                                    : Icons.bolt,
+                                    ? Icons
+                                        .power
+                                    : Icons
+                                        .bolt,
                                 size: 48,
                                 color: connected
                                     ? const Color(
@@ -1410,9 +1613,11 @@ class _HomePageState extends State<HomePage> {
                                     : 'اتصال',
                                 style:
                                     const TextStyle(
-                                  fontSize: 18,
+                                  fontSize:
+                                      18,
                                   fontWeight:
-                                      FontWeight.bold,
+                                      FontWeight
+                                          .bold,
                                 ),
                               ),
                             ],
@@ -1424,27 +1629,36 @@ class _HomePageState extends State<HomePage> {
           ),
         ),
 
-        const SizedBox(height: 16),
+        const SizedBox(
+          height: 16,
+        ),
 
         Center(
           child: Text(
             stateText,
-            textAlign: TextAlign.center,
+            textAlign:
+                TextAlign.center,
             style: TextStyle(
               color: connected
-                  ? const Color(0xFF00E676)
+                  ? const Color(
+                      0xFF00E676,
+                    )
                   : Colors.white70,
-              fontWeight: FontWeight.w600,
+              fontWeight:
+                  FontWeight.w600,
             ),
           ),
         ),
 
-        if (errorText.isNotEmpty) ...[
-          const SizedBox(height: 10),
+        if (lastVpnError.isNotEmpty) ...[
+          const SizedBox(
+            height: 10,
+          ),
           card(
             Column(
               crossAxisAlignment:
-                  CrossAxisAlignment.start,
+                  CrossAxisAlignment
+                      .start,
               children: [
                 const Row(
                   children: [
@@ -1452,21 +1666,28 @@ class _HomePageState extends State<HomePage> {
                       Icons.error_outline,
                       color: Colors.redAccent,
                     ),
-                    SizedBox(width: 8),
+                    SizedBox(
+                      width: 8,
+                    ),
                     Text(
-                      'جزئیات خطا',
-                      style: TextStyle(
+                      'جزئیات خطای VPN',
+                      style:
+                          TextStyle(
                         fontWeight:
                             FontWeight.bold,
                       ),
                     ),
                   ],
                 ),
-                const SizedBox(height: 8),
+                const SizedBox(
+                  height: 10,
+                ),
                 SelectableText(
-                  errorText,
-                  style: const TextStyle(
-                    color: Colors.redAccent,
+                  lastVpnError,
+                  style:
+                      const TextStyle(
+                    color:
+                        Colors.white70,
                     fontSize: 12,
                   ),
                 ),
@@ -1475,34 +1696,45 @@ class _HomePageState extends State<HomePage> {
           ),
         ],
 
-        const SizedBox(height: 20),
+        const SizedBox(
+          height: 20,
+        ),
 
         card(
           Row(
             children: [
               const Icon(
                 Icons.public,
-                color: Color(0xFF00E5FF),
+                color:
+                    Color(0xFF00E5FF),
               ),
-              const SizedBox(width: 12),
+              const SizedBox(
+                width: 12,
+              ),
               Expanded(
                 child: Column(
                   crossAxisAlignment:
-                      CrossAxisAlignment.start,
+                      CrossAxisAlignment
+                          .start,
                   children: [
                     const Text(
                       'سریع‌ترین سرور',
-                      style: TextStyle(
-                        color: Colors.white54,
+                      style:
+                          TextStyle(
+                        color:
+                            Colors.white54,
                       ),
                     ),
-                    const SizedBox(height: 3),
+                    const SizedBox(
+                      height: 3,
+                    ),
                     Text(
                       best?.name ??
                           'هنوز انتخاب نشده',
                       maxLines: 1,
                       overflow:
-                          TextOverflow.ellipsis,
+                          TextOverflow
+                              .ellipsis,
                     ),
                   ],
                 ),
@@ -1510,8 +1742,10 @@ class _HomePageState extends State<HomePage> {
               if (best?.ping != null)
                 Text(
                   '${best!.ping} ms',
-                  style: const TextStyle(
-                    fontWeight: FontWeight.bold,
+                  style:
+                      const TextStyle(
+                    fontWeight:
+                        FontWeight.bold,
                   ),
                 ),
             ],
@@ -1524,7 +1758,8 @@ class _HomePageState extends State<HomePage> {
               child: card(
                 Column(
                   crossAxisAlignment:
-                      CrossAxisAlignment.start,
+                      CrossAxisAlignment
+                          .start,
                   children: [
                     const Row(
                       children: [
@@ -1533,22 +1768,30 @@ class _HomePageState extends State<HomePage> {
                               .arrow_downward_rounded,
                           size: 18,
                           color:
-                              Color(0xFF00E5FF),
+                              Color(
+                            0xFF00E5FF,
+                          ),
                         ),
-                        SizedBox(width: 6),
+                        SizedBox(
+                          width: 6,
+                        ),
                         Text(
                           'دانلود',
-                          style: TextStyle(
+                          style:
+                              TextStyle(
                             color:
                                 Colors.white54,
                           ),
                         ),
                       ],
                     ),
-                    const SizedBox(height: 8),
+                    const SizedBox(
+                      height: 8,
+                    ),
                     Text(
                       download,
-                      style: const TextStyle(
+                      style:
+                          const TextStyle(
                         fontSize: 18,
                         fontWeight:
                             FontWeight.bold,
@@ -1558,14 +1801,15 @@ class _HomePageState extends State<HomePage> {
                 ),
               ),
             ),
-
-            const SizedBox(width: 10),
-
+            const SizedBox(
+              width: 10,
+            ),
             Expanded(
               child: card(
                 Column(
                   crossAxisAlignment:
-                      CrossAxisAlignment.start,
+                      CrossAxisAlignment
+                          .start,
                   children: [
                     const Row(
                       children: [
@@ -1574,22 +1818,30 @@ class _HomePageState extends State<HomePage> {
                               .arrow_upward_rounded,
                           size: 18,
                           color:
-                              Color(0xFF7C4DFF),
+                              Color(
+                            0xFF7C4DFF,
+                          ),
                         ),
-                        SizedBox(width: 6),
+                        SizedBox(
+                          width: 6,
+                        ),
                         Text(
                           'آپلود',
-                          style: TextStyle(
+                          style:
+                              TextStyle(
                             color:
                                 Colors.white54,
                           ),
                         ),
                       ],
                     ),
-                    const SizedBox(height: 8),
+                    const SizedBox(
+                      height: 8,
+                    ),
                     Text(
                       upload,
-                      style: const TextStyle(
+                      style:
+                          const TextStyle(
                         fontSize: 18,
                         fontWeight:
                             FontWeight.bold,
@@ -1605,15 +1857,19 @@ class _HomePageState extends State<HomePage> {
         card(
           Column(
             crossAxisAlignment:
-                CrossAxisAlignment.start,
+                CrossAxisAlignment
+                    .start,
             children: [
               Row(
                 children: [
                   const Icon(
                     Icons.data_usage,
-                    color: Color(0xFF7C4DFF),
+                    color:
+                        Color(0xFF7C4DFF),
                   ),
-                  const SizedBox(width: 8),
+                  const SizedBox(
+                    width: 8,
+                  ),
                   const Expanded(
                     child: Text(
                       'حجم اشتراک',
@@ -1624,54 +1880,62 @@ class _HomePageState extends State<HomePage> {
                   ),
                 ],
               ),
-
-              const SizedBox(height: 12),
-
+              const SizedBox(
+                height: 12,
+              ),
               ClipRRect(
                 borderRadius:
-                    BorderRadius.circular(10),
-                child: LinearProgressIndicator(
+                    BorderRadius
+                        .circular(10),
+                child:
+                    LinearProgressIndicator(
                   value: percent,
                   minHeight: 9,
                 ),
               ),
-
-              const SizedBox(height: 10),
-
+              const SizedBox(
+                height: 10,
+              ),
               Text(
                 'مصرف: ${size(usedBytes)}',
               ),
-
-              const SizedBox(height: 6),
-
+              const SizedBox(
+                height: 6,
+              ),
               Text(
                 'درصد مصرف: ${usedPercent()}',
               ),
-
-              const SizedBox(height: 6),
-
+              const SizedBox(
+                height: 6,
+              ),
               Text(
                 'باقی‌مانده: ${size(totalBytes == null ? null : max(0, totalBytes! - (usedBytes ?? 0)))}',
-                style: const TextStyle(
-                  color: Colors.white70,
+                style:
+                    const TextStyle(
+                  color:
+                      Colors.white70,
                 ),
               ),
-
-              const SizedBox(height: 6),
-
+              const SizedBox(
+                height: 6,
+              ),
               Text(
                 'تاریخ انقضا: ${expiryDate()}',
-                style: const TextStyle(
-                  color: Colors.white70,
+                style:
+                    const TextStyle(
+                  color:
+                      Colors.white70,
                 ),
               ),
-
-              const SizedBox(height: 6),
-
+              const SizedBox(
+                height: 6,
+              ),
               Text(
                 'زمان باقی‌مانده: ${remainingTime()}',
-                style: const TextStyle(
-                  color: Colors.white70,
+                style:
+                    const TextStyle(
+                  color:
+                      Colors.white70,
                 ),
               ),
             ],
@@ -1683,7 +1947,8 @@ class _HomePageState extends State<HomePage> {
 
   Widget _servers() {
     return ListView(
-      padding: const EdgeInsets.all(18),
+      padding:
+          const EdgeInsets.all(18),
       children: [
         header(
           'سرورها',
@@ -1691,8 +1956,10 @@ class _HomePageState extends State<HomePage> {
         ),
 
         FilledButton.icon(
-          onPressed: testing ? null : testAll,
-          icon: const Icon(Icons.speed),
+          onPressed:
+              testing ? null : testAll,
+          icon:
+              const Icon(Icons.speed),
           label: Text(
             testing
                 ? 'در حال تست...'
@@ -1700,7 +1967,9 @@ class _HomePageState extends State<HomePage> {
           ),
         ),
 
-        const SizedBox(height: 14),
+        const SizedBox(
+          height: 14,
+        ),
 
         if (servers.isEmpty)
           card(
@@ -1709,19 +1978,27 @@ class _HomePageState extends State<HomePage> {
                 Icon(
                   Icons.dns_outlined,
                   size: 48,
-                  color: Colors.white38,
+                  color:
+                      Colors.white38,
                 ),
-                SizedBox(height: 12),
+                SizedBox(
+                  height: 12,
+                ),
                 Text(
                   'هنوز سروری دریافت نشده',
                 ),
-                SizedBox(height: 5),
+                SizedBox(
+                  height: 5,
+                ),
                 Text(
                   'از بخش Subscription آن را بروزرسانی کن',
-                  style: TextStyle(
-                    color: Colors.white54,
+                  style:
+                      TextStyle(
+                    color:
+                        Colors.white54,
                   ),
-                  textAlign: TextAlign.center,
+                  textAlign:
+                      TextAlign.center,
                 ),
               ],
             ),
@@ -1729,15 +2006,19 @@ class _HomePageState extends State<HomePage> {
 
         ...servers.asMap().entries.map(
           (entry) {
-            final server = entry.value;
+            final server =
+                entry.value;
 
             return card(
               ListTile(
                 contentPadding:
                     EdgeInsets.zero,
-                leading: CircleAvatar(
+                leading:
+                    CircleAvatar(
                   backgroundColor:
-                      const Color(0xFF16243A),
+                      const Color(
+                    0xFF16243A,
+                  ),
                   child: Text(
                     '${entry.key + 1}',
                   ),
@@ -1746,26 +2027,32 @@ class _HomePageState extends State<HomePage> {
                   server.name,
                   maxLines: 1,
                   overflow:
-                      TextOverflow.ellipsis,
+                      TextOverflow
+                          .ellipsis,
                 ),
                 subtitle: Text(
                   '${server.type} • ${server.host}:${server.port}',
                   maxLines: 2,
                   overflow:
-                      TextOverflow.ellipsis,
+                      TextOverflow
+                          .ellipsis,
                 ),
                 trailing: Text(
                   server.ping == null
                       ? '---'
                       : '${server.ping} ms',
                   style: TextStyle(
-                    color: server.ping == null
-                        ? Colors.white38
-                        : server.ping! < 100
-                            ? const Color(
-                                0xFF00E676,
-                              )
-                            : Colors.orange,
+                    color:
+                        server.ping == null
+                            ? Colors
+                                .white38
+                            : server.ping! <
+                                    100
+                                ? const Color(
+                                    0xFF00E676,
+                                  )
+                                : Colors
+                                    .orange,
                     fontWeight:
                         FontWeight.bold,
                   ),
@@ -1789,7 +2076,8 @@ class _HomePageState extends State<HomePage> {
               );
 
     return ListView(
-      padding: const EdgeInsets.all(18),
+      padding:
+          const EdgeInsets.all(18),
       children: [
         header(
           'ترافیک',
@@ -1799,17 +2087,24 @@ class _HomePageState extends State<HomePage> {
         card(
           ListTile(
             title:
-                const Text('سرعت دانلود'),
+                const Text(
+              'سرعت دانلود',
+            ),
             subtitle: Text(
               download,
-              style: const TextStyle(
+              style:
+                  const TextStyle(
                 fontSize: 18,
-                fontWeight: FontWeight.bold,
+                fontWeight:
+                    FontWeight.bold,
               ),
             ),
-            leading: const Icon(
-              Icons.arrow_downward_rounded,
-              color: Color(0xFF00E5FF),
+            leading:
+                const Icon(
+              Icons
+                  .arrow_downward_rounded,
+              color:
+                  Color(0xFF00E5FF),
             ),
           ),
         ),
@@ -1817,30 +2112,38 @@ class _HomePageState extends State<HomePage> {
         card(
           ListTile(
             title:
-                const Text('سرعت آپلود'),
+                const Text(
+              'سرعت آپلود',
+            ),
             subtitle: Text(
               upload,
-              style: const TextStyle(
+              style:
+                  const TextStyle(
                 fontSize: 18,
-                fontWeight: FontWeight.bold,
+                fontWeight:
+                    FontWeight.bold,
               ),
             ),
-            leading: const Icon(
-              Icons.arrow_upward_rounded,
-              color: Color(0xFF7C4DFF),
+            leading:
+                const Icon(
+              Icons
+                  .arrow_upward_rounded,
+              color:
+                  Color(0xFF7C4DFF),
             ),
           ),
         ),
 
         card(
           ListTile(
-            title: const Text(
+            title:
+                const Text(
               'حجم مصرف‌شده اشتراک',
             ),
-            subtitle: Text(
-              size(usedBytes),
-            ),
-            leading: const Icon(
+            subtitle:
+                Text(size(usedBytes)),
+            leading:
+                const Icon(
               Icons.data_usage,
             ),
           ),
@@ -1849,13 +2152,19 @@ class _HomePageState extends State<HomePage> {
         card(
           ListTile(
             title:
-                const Text('دانلود این جلسه'),
-            subtitle: Text(
-              size(downloadTotalBytes),
+                const Text(
+              'دانلود این جلسه',
             ),
-            leading: const Icon(
+            subtitle: Text(
+              size(
+                downloadTotalBytes,
+              ),
+            ),
+            leading:
+                const Icon(
               Icons.download,
-              color: Color(0xFF00E5FF),
+              color:
+                  Color(0xFF00E5FF),
             ),
           ),
         ),
@@ -1863,13 +2172,19 @@ class _HomePageState extends State<HomePage> {
         card(
           ListTile(
             title:
-                const Text('آپلود این جلسه'),
-            subtitle: Text(
-              size(uploadTotalBytes),
+                const Text(
+              'آپلود این جلسه',
             ),
-            leading: const Icon(
+            subtitle: Text(
+              size(
+                uploadTotalBytes,
+              ),
+            ),
+            leading:
+                const Icon(
               Icons.upload,
-              color: Color(0xFF7C4DFF),
+              color:
+                  Color(0xFF7C4DFF),
             ),
           ),
         ),
@@ -1877,11 +2192,13 @@ class _HomePageState extends State<HomePage> {
         card(
           ListTile(
             title:
-                const Text('حجم باقی‌مانده'),
-            subtitle: Text(
-              size(remaining),
+                const Text(
+              'حجم باقی‌مانده',
             ),
-            leading: const Icon(
+            subtitle:
+                Text(size(remaining)),
+            leading:
+                const Icon(
               Icons.storage,
             ),
           ),
@@ -1890,11 +2207,13 @@ class _HomePageState extends State<HomePage> {
         card(
           ListTile(
             title:
-                const Text('تاریخ انقضا'),
-            subtitle: Text(
-              expiryDate(),
+                const Text(
+              'تاریخ انقضا',
             ),
-            leading: const Icon(
+            subtitle:
+                Text(expiryDate()),
+            leading:
+                const Icon(
               Icons.event,
             ),
           ),
@@ -1903,11 +2222,14 @@ class _HomePageState extends State<HomePage> {
         card(
           ListTile(
             title:
-                const Text('زمان باقی‌مانده'),
+                const Text(
+              'زمان باقی‌مانده',
+            ),
             subtitle: Text(
               remainingTime(),
             ),
-            leading: const Icon(
+            leading:
+                const Icon(
               Icons.timer_outlined,
             ),
           ),
@@ -1918,7 +2240,8 @@ class _HomePageState extends State<HomePage> {
 
   Widget _subscription() {
     return ListView(
-      padding: const EdgeInsets.all(18),
+      padding:
+          const EdgeInsets.all(18),
       children: [
         header(
           'Subscription',
@@ -1927,24 +2250,34 @@ class _HomePageState extends State<HomePage> {
 
         TextField(
           controller: url,
-          textDirection: TextDirection.ltr,
-          keyboardType: TextInputType.url,
+          textDirection:
+              TextDirection.ltr,
+          keyboardType:
+              TextInputType.url,
           decoration:
               const InputDecoration(
-            labelText: 'Subscription URL',
-            prefixIcon: Icon(Icons.link),
+            labelText:
+                'Subscription URL',
+            prefixIcon:
+                Icon(Icons.link),
           ),
         ),
 
-        const SizedBox(height: 12),
+        const SizedBox(
+          height: 12,
+        ),
 
         SizedBox(
           height: 52,
-          child: FilledButton.icon(
+          child:
+              FilledButton.icon(
             onPressed: loading
                 ? null
-                : () => loadSubscription(),
-            icon: const Icon(Icons.refresh),
+                : () =>
+                    loadSubscription(),
+            icon: const Icon(
+              Icons.refresh,
+            ),
             label: Text(
               loading
                   ? 'در حال دریافت...'
@@ -1953,23 +2286,30 @@ class _HomePageState extends State<HomePage> {
           ),
         ),
 
-        const SizedBox(height: 18),
+        const SizedBox(
+          height: 18,
+        ),
 
         card(
           Column(
             crossAxisAlignment:
-                CrossAxisAlignment.start,
+                CrossAxisAlignment
+                    .start,
             children: [
               const Row(
                 children: [
                   Icon(
                     Icons.cloud_download,
-                    color: Color(0xFF00E5FF),
+                    color:
+                        Color(0xFF00E5FF),
                   ),
-                  SizedBox(width: 8),
+                  SizedBox(
+                    width: 8,
+                  ),
                   Text(
                     'وضعیت اشتراک',
-                    style: TextStyle(
+                    style:
+                        TextStyle(
                       fontWeight:
                           FontWeight.bold,
                     ),
@@ -1977,43 +2317,57 @@ class _HomePageState extends State<HomePage> {
                 ],
               ),
 
-              const SizedBox(height: 14),
+              const SizedBox(
+                height: 14,
+              ),
 
               Text(
                 'تعداد سرورها: ${servers.length}',
               ),
 
-              const SizedBox(height: 7),
+              const SizedBox(
+                height: 7,
+              ),
 
               Text(
                 'حجم کل: ${size(totalBytes)}',
               ),
 
-              const SizedBox(height: 7),
+              const SizedBox(
+                height: 7,
+              ),
 
               Text(
                 'مصرف‌شده: ${size(usedBytes)}',
               ),
 
-              const SizedBox(height: 7),
+              const SizedBox(
+                height: 7,
+              ),
 
               Text(
                 'درصد مصرف: ${usedPercent()}',
               ),
 
-              const SizedBox(height: 7),
+              const SizedBox(
+                height: 7,
+              ),
 
               Text(
                 'حجم باقی‌مانده: ${size(totalBytes == null ? null : max(0, totalBytes! - (usedBytes ?? 0)))}',
               ),
 
-              const SizedBox(height: 7),
+              const SizedBox(
+                height: 7,
+              ),
 
               Text(
                 'تاریخ انقضا: ${expiryDate()}',
               ),
 
-              const SizedBox(height: 7),
+              const SizedBox(
+                height: 7,
+              ),
 
               Text(
                 'زمان باقی‌مانده: ${remainingTime()}',
@@ -2025,10 +2379,11 @@ class _HomePageState extends State<HomePage> {
         card(
           const Text(
             'بروزرسانی خودکار هر ۱۵ دقیقه انجام می‌شود.\n'
-            'تاریخ و زمان باقی‌مانده نیز به‌صورت خودکار بروزرسانی می‌شوند.\n'
+            'تاریخ و زمان باقی‌مانده نیز خودکار بروزرسانی می‌شوند.\n'
             'بعد از دریافت اشتراک، سرورها دوباره Ping می‌شوند.',
             style: TextStyle(
-              color: Colors.white70,
+              color:
+                  Colors.white70,
               height: 1.6,
             ),
           ),
@@ -2039,7 +2394,8 @@ class _HomePageState extends State<HomePage> {
 
   Widget _settings() {
     return ListView(
-      padding: const EdgeInsets.all(18),
+      padding:
+          const EdgeInsets.all(18),
       children: [
         header(
           'تنظیمات',
@@ -2048,7 +2404,8 @@ class _HomePageState extends State<HomePage> {
 
         card(
           const ListTile(
-            leading: Icon(Icons.flash_on),
+            leading:
+                Icon(Icons.flash_on),
             title: Text(
               'انتخاب سریع‌ترین سرور',
             ),
@@ -2060,7 +2417,8 @@ class _HomePageState extends State<HomePage> {
 
         card(
           const ListTile(
-            leading: Icon(Icons.sync),
+            leading:
+                Icon(Icons.sync),
             title: Text(
               'Auto Refresh',
             ),
@@ -2072,9 +2430,8 @@ class _HomePageState extends State<HomePage> {
 
         card(
           ListTile(
-            leading: const Icon(
-              Icons.shield,
-            ),
+            leading:
+                const Icon(Icons.shield),
             title: const Text(
               'VPN Engine',
             ),
@@ -2084,9 +2441,29 @@ class _HomePageState extends State<HomePage> {
           ),
         ),
 
+        if (lastVpnError.isNotEmpty)
+          card(
+            ListTile(
+              leading:
+                  const Icon(
+                Icons.error_outline,
+                color:
+                    Colors.redAccent,
+              ),
+              title: const Text(
+                'آخرین خطای VPN',
+              ),
+              subtitle:
+                  SelectableText(
+                lastVpnError,
+              ),
+            ),
+          ),
+
         card(
           const ListTile(
-            leading: Icon(Icons.speed),
+            leading:
+                Icon(Icons.speed),
             title: Text(
               'Traffic Monitor',
             ),
@@ -2098,7 +2475,8 @@ class _HomePageState extends State<HomePage> {
 
         card(
           const ListTile(
-            leading: Icon(Icons.security),
+            leading:
+                Icon(Icons.security),
             title: Text(
               'VPN Mode',
             ),
@@ -2116,8 +2494,10 @@ class _HomePageState extends State<HomePage> {
     stateSub?.cancel();
     trafficSub?.cancel();
     faultSub?.cancel();
+
     refreshTimer?.cancel();
     clockTimer?.cancel();
+
     url.dispose();
 
     super.dispose();
