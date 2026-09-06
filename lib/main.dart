@@ -75,6 +75,7 @@ class _HomePageState extends State<HomePage> {
 
   StreamSubscription? stateSub;
   StreamSubscription? trafficSub;
+  StreamSubscription? faultSub;
 
   Timer? refreshTimer;
   Timer? durationTimer;
@@ -145,7 +146,7 @@ class _HomePageState extends State<HomePage> {
     });
 
     try {
-      vpn.faultStream.listen((e) {
+      faultSub = vpn.faultStream.listen((e) {
         if (!mounted) return;
 
         setState(() {
@@ -434,6 +435,7 @@ class _HomePageState extends State<HomePage> {
 
       final decoded = utf8.decode(
         base64.decode(data),
+        allowMalformed: true,
       );
 
       final map =
@@ -829,7 +831,6 @@ class _HomePageState extends State<HomePage> {
           'type': 'tun',
           'tag': 'tun-in',
 
-          // IPv4 only
           'address': [
             '172.19.0.1/30',
           ],
@@ -1104,8 +1105,6 @@ class _HomePageState extends State<HomePage> {
         body: SafeArea(
           child: pages[page],
         ),
-
-        // هیچ قفل مرحله‌ای اینجا وجود ندارد.
         bottomNavigationBar:
             NavigationBar(
           selectedIndex: page,
@@ -1221,7 +1220,9 @@ class _HomePageState extends State<HomePage> {
             BorderRadius.circular(22),
         border: Border.all(
           color:
-              Colors.white.withOpacity(.05),
+              Colors.white.withValues(
+            alpha: .05,
+          ),
         ),
       ),
       child: child,
@@ -1284,7 +1285,9 @@ class _HomePageState extends State<HomePage> {
                                 : const Color(
                                     0xFF00E5FF,
                                   ))
-                            .withOpacity(.35),
+                            .withValues(
+                      alpha: .35,
+                    ),
                     blurRadius: 40,
                     spreadRadius: 8,
                   ),
@@ -1894,6 +1897,7 @@ class _HomePageState extends State<HomePage> {
   void dispose() {
     stateSub?.cancel();
     trafficSub?.cancel();
+    faultSub?.cancel();
 
     refreshTimer?.cancel();
     durationTimer?.cancel();
