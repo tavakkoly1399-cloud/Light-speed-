@@ -325,6 +325,14 @@ class _HomePageState extends State<HomePage> {
 
   void _readUserInfo(String? raw) {
     if (raw == null || raw.trim().isEmpty) {
+      if (!mounted) return;
+
+      setState(() {
+        totalBytes = null;
+        usedBytes = null;
+        expireAt = null;
+      });
+
       return;
     }
 
@@ -461,8 +469,10 @@ class _HomePageState extends State<HomePage> {
       encoded +=
           '=' * ((4 - encoded.length % 4) % 4);
 
-      final decoded =
-          utf8.decode(base64.decode(encoded));
+      final decoded = utf8.decode(
+        base64.decode(encoded),
+        allowMalformed: true,
+      );
 
       final map =
           json.decode(decoded) as Map<String, dynamic>;
@@ -735,25 +745,27 @@ class _HomePageState extends State<HomePage> {
 
     return jsonEncode({
       'log': {
-        'level': 'warn',
+        'level': 'info',
       },
+
       'dns': {
         'servers': [
+          {
+            'type': 'local',
+            'tag': 'dns-local',
+          },
           {
             'type': 'https',
             'tag': 'dns-remote',
             'server': '1.1.1.1',
             'server_port': 443,
             'path': '/dns-query',
-            'detour': 'proxy',
-          },
-          {
-            'type': 'local',
-            'tag': 'dns-local',
+            'detour': 'direct',
           },
         ],
         'final': 'dns-remote',
       },
+
       'inbounds': [
         {
           'type': 'tun',
@@ -765,6 +777,7 @@ class _HomePageState extends State<HomePage> {
           'stack': 'mixed',
         },
       ],
+
       'outbounds': [
         outbound,
         {
@@ -776,9 +789,18 @@ class _HomePageState extends State<HomePage> {
           'tag': 'block',
         },
       ],
+
       'route': {
         'auto_detect_interface': true,
         'override_android_vpn': true,
+
+        'rules': [
+          {
+            'protocol': 'dns',
+            'action': 'hijack-dns',
+          },
+        ],
+
         'final': 'proxy',
       },
     });
@@ -876,6 +898,10 @@ class _HomePageState extends State<HomePage> {
 
     if (connected) {
       await disconnect();
+      return;
+    }
+
+    if (connecting) {
       return;
     }
 
@@ -1058,8 +1084,10 @@ class _HomePageState extends State<HomePage> {
     }
 
     final days = seconds ~/ 86400;
+
     final hours =
         (seconds % 86400) ~/ 3600;
+
     final minutes =
         (seconds % 3600) ~/ 60;
 
@@ -1086,12 +1114,16 @@ class _HomePageState extends State<HomePage> {
 
     final year =
         date.year.toString().padLeft(4, '0');
+
     final month =
         date.month.toString().padLeft(2, '0');
+
     final day =
         date.day.toString().padLeft(2, '0');
+
     final hour =
         date.hour.toString().padLeft(2, '0');
+
     final minute =
         date.minute.toString().padLeft(2, '0');
 
