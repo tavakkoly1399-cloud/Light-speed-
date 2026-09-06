@@ -97,6 +97,7 @@ class _HomePageState extends State<HomePage> {
   bool connecting = false;
 
   String stateText = 'آماده اتصال';
+  String errorText = '';
 
   String download = '0 Mbps';
   String upload = '0 Mbps';
@@ -177,13 +178,18 @@ class _HomePageState extends State<HomePage> {
     faultSub = vpn.faultStream.listen((error) {
       if (!mounted) return;
 
-      final text = '$error';
+      final text = error.toString().trim();
 
-      if (text.trim().isNotEmpty) {
-        setState(() {
-          stateText = 'خطای VPN';
-        });
-      }
+      if (text.isEmpty) return;
+
+      setState(() {
+        stateText = 'خطای VPN';
+        errorText = text;
+        connected = false;
+        connecting = false;
+      });
+
+      snack('خطای VPN: $text');
     });
 
     refreshTimer = Timer.periodic(
@@ -239,6 +245,7 @@ class _HomePageState extends State<HomePage> {
     if (mounted) {
       setState(() {
         loading = true;
+        errorText = '';
 
         if (!silent) {
           stateText = 'در حال دریافت سرورها...';
@@ -307,12 +314,13 @@ class _HomePageState extends State<HomePage> {
       });
 
       await testAll(silent: true);
-    } catch (_) {
+    } catch (e) {
       if (!mounted) return;
 
       setState(() {
         loading = false;
         stateText = 'خطا در دریافت Subscription';
+        errorText = e.toString();
       });
 
       if (!silent) {
@@ -522,7 +530,7 @@ class _HomePageState extends State<HomePage> {
 
       return Server(
         raw: raw,
-        name: map['ps'] ?? 'VMess',
+        name: map['ps']?.toString() ?? 'VMess',
         type: 'VMESS',
         host: host,
         port: port,
@@ -809,7 +817,7 @@ class _HomePageState extends State<HomePage> {
   Future<void> testAll({
     bool silent = false,
   }) async {
-    if (servers.isEmpty) {
+    if (servers.isEmpty || testing) {
       return;
     }
 
@@ -818,9 +826,15 @@ class _HomePageState extends State<HomePage> {
         testing = true;
         stateText = 'در حال تست Ping...';
       });
+    } else {
+      testing = true;
     }
 
     for (final server in servers) {
+      if (!mounted && !silent) {
+        break;
+      }
+
       final stopwatch = Stopwatch()..start();
 
       try {
@@ -859,10 +873,10 @@ class _HomePageState extends State<HomePage> {
       return a.ping!.compareTo(b.ping!);
     });
 
+    testing = false;
+
     if (mounted) {
       setState(() {
-        testing = false;
-
         if (!silent) {
           stateText = 'سرورها مرتب شدند';
         }
@@ -908,6 +922,7 @@ class _HomePageState extends State<HomePage> {
     if (mounted) {
       setState(() {
         connecting = true;
+        errorText = '';
         stateText =
             'در حال انتخاب سریع‌ترین سرور...';
       });
@@ -946,7 +961,7 @@ class _HomePageState extends State<HomePage> {
 
       if (!permission) {
         throw Exception(
-          'VPN permission denied',
+          'اجازه VPN داده نشد',
         );
       }
 
@@ -989,6 +1004,7 @@ class _HomePageState extends State<HomePage> {
         connecting = false;
         connected = false;
         stateText = 'اتصال ناموفق';
+        errorText = e.toString();
       });
 
       snack(
@@ -1146,9 +1162,14 @@ class _HomePageState extends State<HomePage> {
   }
 
   void snack(String text) {
+    if (!mounted) return;
+
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
-        content: Text(text),
+        content: Text(
+          text,
+          textDirection: TextDirection.rtl,
+        ),
         behavior: SnackBarBehavior.floating,
       ),
     );
@@ -1417,6 +1438,42 @@ class _HomePageState extends State<HomePage> {
             ),
           ),
         ),
+
+        if (errorText.isNotEmpty) ...[
+          const SizedBox(height: 10),
+          card(
+            Column(
+              crossAxisAlignment:
+                  CrossAxisAlignment.start,
+              children: [
+                const Row(
+                  children: [
+                    Icon(
+                      Icons.error_outline,
+                      color: Colors.redAccent,
+                    ),
+                    SizedBox(width: 8),
+                    Text(
+                      'جزئیات خطا',
+                      style: TextStyle(
+                        fontWeight:
+                            FontWeight.bold,
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 8),
+                SelectableText(
+                  errorText,
+                  style: const TextStyle(
+                    color: Colors.redAccent,
+                    fontSize: 12,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
 
         const SizedBox(height: 20),
 
