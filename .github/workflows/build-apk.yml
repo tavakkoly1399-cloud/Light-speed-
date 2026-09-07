@@ -12,8 +12,8 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - name: Checkout repository
+        uses: actions/checkout@v5
 
       - name: Setup Flutter
         uses: subosito/flutter-action@v2
@@ -38,18 +38,17 @@ jobs:
             sed -i 's/compileSdk = flutter.compileSdkVersion/compileSdk = 36/g' android/app/build.gradle.kts
             sed -i 's/minSdk = flutter.minSdkVersion/minSdk = 23/g' android/app/build.gradle.kts
           fi
-
           if [ -f android/app/build.gradle ]; then
             sed -i 's/compileSdkVersion flutter.compileSdkVersion/compileSdkVersion 36/g' android/app/build.gradle
             sed -i 's/minSdkVersion flutter.minSdkVersion/minSdkVersion 23/g' android/app/build.gradle
           fi
 
-      - name: Check icon
+      - name: Verify required files
+        shell: bash
         run: |
-          test -f assets/icon/light_speed_icon.png || {
-            echo "ERROR: Icon file not found"
-            exit 1
-          }
+          test -f lib/main.dart
+          test -f assets/icon/light_speed_icon.png
+          grep -q "flutter_singbox_client" pubspec.yaml
 
       - name: Remove default tests
         run: rm -rf test
