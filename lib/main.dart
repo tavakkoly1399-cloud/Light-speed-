@@ -1771,138 +1771,123 @@ class _HomePageState extends State<HomePage>
       ),
     );
   }
-    Widget _serverTile(ServerNode server) {
-    final selected = selectedServer?.id == server.id;
-    final connecting = isConnecting && selected;
+  Widget _serverTile(ServerNode server, bool fastest) {
+    final selected = selectedServer?.raw == server.raw;
+    final busy = connecting && selected;
 
-    return Container(
-      margin: const EdgeInsets.only(bottom: 10),
-      decoration: BoxDecoration(
-        color: selected
-            ? const Color(0xFF00D4FF).withValues(alpha: .10)
-            : Colors.white.withValues(alpha: .04),
-        borderRadius: BorderRadius.circular(18),
-        border: Border.all(
+    return InkWell(
+      borderRadius: BorderRadius.circular(16),
+      onTap: selectionMode == ServerSelectionMode.manual && !connecting
+          ? () async {
+              setState(() => selectedServer = server);
+              await _saveSelected();
+            }
+          : null,
+      child: Container(
+        margin: const EdgeInsets.only(bottom: 8),
+        padding: const EdgeInsets.all(12),
+        decoration: BoxDecoration(
           color: selected
-              ? const Color(0xFF00D4FF).withValues(alpha: .45)
-              : Colors.white.withValues(alpha: .07),
-        ),
-      ),
-      child: InkWell(
-        borderRadius: BorderRadius.circular(18),
-        onTap: () {
-          setState(() {
-            selectedServer = server;
-          });
-          _saveSelectedServer();
-        },
-        child: Padding(
-          padding: const EdgeInsets.all(14),
-          child: Row(
-            children: [
-              Container(
-                width: 44,
-                height: 44,
-                decoration: BoxDecoration(
-                  color: selected
-                      ? const Color(0xFF00D4FF).withValues(alpha: .15)
-                      : Colors.white.withValues(alpha: .06),
-                  shape: BoxShape.circle,
-                ),
-                child: Icon(
-                  server.type == 'vless'
-                      ? Icons.bolt_rounded
-                      : server.type == 'vmess'
-                          ? Icons.cloud_outlined
-                          : Icons.public_rounded,
-                  color: selected
-                      ? const Color(0xFF00D4FF)
-                      : Colors.white70,
-                ),
-              ),
-              const SizedBox(width: 12),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      server.name,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: const TextStyle(
-                        fontWeight: FontWeight.w700,
-                        fontSize: 15,
-                      ),
-                    ),
-                    const SizedBox(height: 5),
-                    Text(
-                      '${server.host}:${server.port}',
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: const TextStyle(
-                        color: Colors.white54,
-                        fontSize: 11,
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-              const SizedBox(width: 8),
-              if (connecting)
-                const SizedBox(
-                  width: 20,
-                  height: 20,
-                  child: CircularProgressIndicator(
-                    strokeWidth: 2,
-                  ),
-                )
-              else if (server.ping != null)
-                Container(
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: 9,
-                    vertical: 5,
-                  ),
-                  decoration: BoxDecoration(
-                    color: pingColor(server.ping).withValues(alpha: .12),
-                    borderRadius: BorderRadius.circular(10),
-                  ),
-                  child: Text(
-                    '${server.ping} ms',
-                    style: TextStyle(
-                      color: pingColor(server.ping),
-                      fontSize: 11,
-                      fontWeight: FontWeight.w700,
-                    ),
-                  ),
-                )
-              else
-                const Icon(
-                  Icons.chevron_right_rounded,
-                  color: Colors.white38,
-                ),
-            ],
+              ? const Color(0xFF7C4DFF).withValues(alpha: .10)
+              : Colors.white.withValues(alpha: .035),
+          borderRadius: BorderRadius.circular(16),
+          border: Border.all(
+            color: selected
+                ? const Color(0xFF7C4DFF).withValues(alpha: .50)
+                : Colors.white.withValues(alpha: .07),
           ),
+        ),
+        child: Row(
+          children: [
+            Container(
+              width: 42,
+              height: 42,
+              decoration: BoxDecoration(
+                shape: BoxShape.circle,
+                color: fastest
+                    ? Colors.amberAccent.withValues(alpha: .12)
+                    : Colors.white.withValues(alpha: .06),
+              ),
+              child: Icon(
+                fastest ? Icons.flash_on_rounded : Icons.public_rounded,
+                color: fastest ? Colors.amberAccent : Colors.white70,
+              ),
+            ),
+            const SizedBox(width: 10),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    children: [
+                      Expanded(
+                        child: Text(
+                          server.name,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(
+                            fontWeight: FontWeight.w800,
+                            fontSize: 14,
+                          ),
+                        ),
+                      ),
+                      if (fastest) ...[
+                        const SizedBox(width: 6),
+                        const Text(
+                          'سریع‌ترین',
+                          style: TextStyle(
+                            color: Colors.amberAccent,
+                            fontSize: 10,
+                            fontWeight: FontWeight.w800,
+                          ),
+                        ),
+                      ],
+                    ],
+                  ),
+                  const SizedBox(height: 4),
+                  Text(
+                    '${server.type} • ${server.host}:${server.port}',
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                      color: Colors.white.withValues(alpha: .45),
+                      fontSize: 11,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(width: 8),
+            if (busy)
+              const SizedBox(
+                width: 20,
+                height: 20,
+                child: CircularProgressIndicator(strokeWidth: 2),
+              )
+            else
+              Text(
+                server.pingMs == null ? '—' : '${server.pingMs} ms',
+                style: TextStyle(
+                  color: pingColor(server.pingMs),
+                  fontSize: 11,
+                  fontWeight: FontWeight.w800,
+                ),
+              ),
+          ],
         ),
       ),
     );
   }
 
   Widget _subscriptionButton() {
-    return OutlinedButton.icon(
-      onPressed: loadingSubscription ? null : _showSubscriptionDialog,
-      icon: const Icon(Icons.link_rounded, size: 18),
-      label: const Text('مدیریت لینک اشتراک'),
-      style: OutlinedButton.styleFrom(
-        foregroundColor: const Color(0xFF00D4FF),
-        side: BorderSide(
-          color: const Color(0xFF00D4FF).withValues(alpha: .35),
-        ),
-        shape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.circular(14),
-        ),
-        padding: const EdgeInsets.symmetric(
-          horizontal: 16,
-          vertical: 13,
+    return FilledButton.tonalIcon(
+      onPressed: loading ? null : addSubscription,
+      icon: const Icon(Icons.link_rounded),
+      label: const Padding(
+        padding: EdgeInsets.symmetric(vertical: 13),
+        child: Text(
+          'افزودن / تغییر Subscription',
+          style: TextStyle(fontWeight: FontWeight.bold),
         ),
       ),
     );
