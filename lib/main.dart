@@ -1122,6 +1122,11 @@ class _HomePageState extends State<HomePage>
 
           'auto_route': true,
 
+          // Force Android's VPN/TUN routing path to handle all routed
+          // traffic and help prevent traffic/DNS leaks when auto_route
+          // is enabled.
+          'strict_route': true,
+
           // mixed is better for normal TCP + UDP apps
           // such as Telegram and other mobile applications.
           'stack': 'mixed',
