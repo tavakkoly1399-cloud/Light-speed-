@@ -47,9 +47,12 @@ jobs:
       - name: Check icon
         run: |
           test -f assets/icon/light_speed_icon.png || {
-            echo "ERROR: assets/icon/light_speed_icon.png not found"
+            echo "ERROR: Icon file not found"
             exit 1
           }
+
+      - name: Remove default tests
+        run: rm -rf test
 
       - name: Get packages
         run: flutter pub get
