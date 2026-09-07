@@ -11,13 +11,11 @@ final vpn = SingboxClient();
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
-
   try {
     await vpn.initialize();
   } catch (e) {
     debugPrint('VPN initialize error: $e');
   }
-
   runApp(const LightSpeedApp());
 }
 
@@ -37,20 +35,16 @@ class LightSpeedApp extends StatelessWidget {
           seedColor: const Color(0xFF7C4DFF),
           brightness: Brightness.dark,
         ),
-        fontFamily: 'sans',
       ),
       home: const HomePage(),
     );
   }
 }
 
-enum ServerSelectionMode {
-  auto,
-  manual,
-}
+enum ServerSelectionMode { auto, manual }
 
-class Server {
-  Server({
+class ServerNode {
+  ServerNode({
     required this.raw,
     required this.name,
     required this.type,
@@ -65,13 +59,19 @@ class Server {
   final String host;
   final int port;
   final Map<String, dynamic> outbound;
-
-  int? ping;
+  int? pingMs;
 }
 
-// ============================================================================
-// HOME PAGE
-// ============================================================================
+class SubscriptionInfo {
+  int? upload;
+  int? download;
+  int? total;
+  int? expire;
+
+  int? get used => (upload == null && download == null)
+      ? null
+      : (upload ?? 0) + (download ?? 0);
+}
 
 class HomePage extends StatefulWidget {
   const HomePage({super.key});
@@ -82,74 +82,39 @@ class HomePage extends StatefulWidget {
 
 class _HomePageState extends State<HomePage>
     with WidgetsBindingObserver {
-  final TextEditingController url = TextEditingController();
+  final urlController = TextEditingController();
 
-  final List<Server> servers = [];
+  final List<ServerNode> servers = [];
+  final subscription = SubscriptionInfo();
 
   StreamSubscription? stateSub;
   StreamSubscription? trafficSub;
   StreamSubscription? faultSub;
-  StreamSubscription? networkQualitySub;
-  StreamSubscription? stunSub;
+  Timer? refreshTimer;
 
-  Timer? timer;
-
-  int page = 0;
+  ServerNode? selectedServer;
+  ServerSelectionMode selectionMode = ServerSelectionMode.auto;
 
   bool loading = false;
   bool testing = false;
   bool connected = false;
   bool connecting = false;
 
-  bool networkTestRunning = false;
-  bool stunTestRunning = false;
-
-  String stateText = 'آماده اتصال';
-
-  String download = '0 Mbps';
-  String upload = '0 Mbps';
-
-  String testDownload = '0 Mbps';
-  String testUpload = '0 Mbps';
-  String testPing = '—';
-
-  String stunLatency = '—';
-  String externalIp = '—';
-  String natType = '—';
-
-  int downloadTotalBytes = 0;
-  int uploadTotalBytes = 0;
-
-  int? totalBytes;
-  int? usedBytes;
-  int? uploadBytes;
-  int? downloadBytes;
-  int? expireAt;
-
-  double downloadCapacityBps = 0;
-  double uploadCapacityBps = 0;
-
-  int? idleLatencyMs;
-  int? downloadRpm;
-  int? uploadRpm;
-
-  Server? selectedServer;
-
-  ServerSelectionMode selectionMode =
-      ServerSelectionMode.auto;
-
+  String status = 'آماده اتصال';
+  String downloadSpeed = '0 B/s';
+  String uploadSpeed = '0 B/s';
+  int downloadTotal = 0;
+  int uploadTotal = 0;
   String? lastUpdate;
 
   @override
   void initState() {
     super.initState();
-
     WidgetsBinding.instance.addObserver(this);
-
     _listenVpn();
-    loadSaved();
+    _loadSaved();
 
-    timer = Timer.periodic(
+    refreshTimer = Timer.periodic(
       const Duration(minutes: 15),
       (_) => loadSubscription(silent: true),
     );
@@ -158,646 +123,167 @@ class _HomePageState extends State<HomePage>
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
-
     stateSub?.cancel();
     trafficSub?.cancel();
     faultSub?.cancel();
-    networkQualitySub?.cancel();
-    stunSub?.cancel();
-
-    timer?.cancel();
-    url.dispose();
-
+    refreshTimer?.cancel();
+    urlController.dispose();
     super.dispose();
   }
 
-  // ==========================================================================
-  // APP LIFECYCLE
-  // ==========================================================================
-
   @override
-  void didChangeAppLifecycleState(
-    AppLifecycleState state,
-  ) {
+  void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.resumed) {
       _syncVpnState();
     }
   }
 
-  Future<void> _syncVpnState() async {
-    try {
-      final current = await vpn.getServiceState();
-
+  void _listenVpn() {
+    stateSub = vpn.serviceStateStream.listen((state) {
       if (!mounted) return;
-
-      final text = current.toString().toLowerCase();
+      final s = state.toString().toLowerCase();
 
       setState(() {
-        if (text.contains('started') ||
-            text.contains('running') ||
-            text.contains('connected')) {
+        if (s.contains('started') ||
+            s.contains('running') ||
+            s.contains('connected')) {
           connected = true;
           connecting = false;
-          stateText = 'VPN متصل است';
-        } else if (text.contains('starting')) {
+          status = 'VPN متصل است';
+        } else if (s.contains('starting')) {
           connecting = true;
-          stateText = 'در حال اتصال...';
-        } else if (text.contains('stopping')) {
+          status = 'در حال اتصال...';
+        } else if (s.contains('stopping')) {
           connecting = true;
-          stateText = 'در حال قطع اتصال...';
-        } else if (text.contains('stopped') ||
-            text.contains('disconnected')) {
+          status = 'در حال قطع اتصال...';
+        } else if (s.contains('stopped') ||
+            s.contains('disconnected')) {
           connected = false;
           connecting = false;
-          stateText = 'VPN متوقف است';
+          status = 'VPN متوقف است';
+          downloadSpeed = '0 B/s';
+          uploadSpeed = '0 B/s';
         }
       });
+    });
+
+    trafficSub = vpn.trafficStatsStream.listen((stats) {
+      if (!mounted) return;
+      setState(() {
+        downloadSpeed = formatSpeed(stats.downlinkBps);
+        uploadSpeed = formatSpeed(stats.uplinkBps);
+        downloadTotal = stats.downlinkTotalBytes;
+        uploadTotal = stats.uplinkTotalBytes;
+      });
+    });
+
+    faultSub = vpn.faultStream.listen((error) {
+      if (!mounted) return;
+      setState(() {
+        connected = false;
+        connecting = false;
+        status = 'خطای VPN';
+      });
+      _show('خطای sing-box:\n$error');
+    });
+  }
+
+  Future<void> _syncVpnState() async {
+    try {
+      final state = await vpn.getServiceState();
+      if (!mounted) return;
+
+      final s = state.toString().toLowerCase();
+      setState(() {
+        connected = s.contains('started') ||
+            s.contains('running') ||
+            s.contains('connected');
+        connecting = s.contains('starting') ||
+            s.contains('stopping');
+        status = _stateText(s);
+      });
     } catch (e) {
-      debugPrint('getServiceState: $e');
+      debugPrint('VPN state error: $e');
     }
   }
 
-  // ==========================================================================
-  // VPN EVENTS
-  // ==========================================================================
-
-  void _listenVpn() {
-    stateSub = vpn.serviceStateStream.listen(
-      (state) {
-        if (!mounted) return;
-
-        final text = state.toString();
-        final low = text.toLowerCase();
-        setState(() {
-          stateText = _prettyState(text);
-
-          if (low.contains('started') ||
-              low.contains('running') ||
-              low.contains('connected')) {
-            connected = true;
-            connecting = false;
-          }
-
-          if (low.contains('stopped') ||
-              low.contains('disconnected')) {
-            connected = false;
-            connecting = false;
-            download = '0 Mbps';
-            upload = '0 Mbps';
-          }
-
-          if (low.contains('starting') ||
-              low.contains('stopping')) {
-            connecting = true;
-          }
-        });
-      },
-      onError: (Object error) {
-        debugPrint(
-          'VPN state stream error: $error',
-        );
-      },
-    );
-
-    trafficSub = vpn.trafficStatsStream.listen(
-      (stats) {
-        if (!mounted) return;
-
-        try {
-          setState(() {
-            download = speed(stats.downlinkBps);
-            upload = speed(stats.uplinkBps);
-
-            downloadTotalBytes =
-                stats.downlinkTotalBytes;
-
-            uploadTotalBytes =
-                stats.uplinkTotalBytes;
-          });
-        } catch (e) {
-          debugPrint(
-            'Traffic stats error: $e',
-          );
-        }
-      },
-      onError: (Object error) {
-        debugPrint(
-          'Traffic stream error: $error',
-        );
-      },
-    );
-
-    faultSub = vpn.faultStream.listen(
-      (error) {
-        if (!mounted) return;
-        final message = error.toString();
-
-        debugPrint(
-          'SINGBOX FAULT: $message',
-        );
-
-        setState(() {
-          stateText = 'خطای VPN';
-          connected = false;
-          connecting = false;
-        });
-
-        snack(
-          'خطای sing-box:\n$message',
-        );
-      },
-      onError: (Object error) {
-        debugPrint(
-          'Fault stream error: $error',
-        );
-      },
-    );
-
-    // ------------------------------------------------------------------------
-    // Network quality
-    // ------------------------------------------------------------------------
-
-    networkQualitySub =
-        vpn.networkQualityProgressStream.listen(
-      (progress) {
-        if (!mounted) return;
-
-        try {
-          final dynamic p = progress;
-
-          final running =
-              _dynamicBool(
-                    p,
-                    'isRunning',
-                  ) ??
-                  false;
-          final double down =
-              (_dynamicNum(
-                    p,
-                    'downloadCapacityBps',
-                  ) ??
-                  0)
-              .toDouble();
-
-          final double up =
-              (_dynamicNum(
-                    p,
-                    'uploadCapacityBps',
-                  ) ??
-                  0)
-              .toDouble();
-
-          final latency = _dynamicInt(
-            p,
-            'idleLatencyMs',
-          );
-          final dRpm = _dynamicInt(
-            p,
-            'downloadRPM',
-          );
-
-          final uRpm = _dynamicInt(
-            p,
-            'uploadRPM',
-          );
-
-          setState(() {
-            networkTestRunning = running;
-
-            downloadCapacityBps = down;
-            uploadCapacityBps = up;
-
-            idleLatencyMs = latency;
-            downloadRpm = dRpm;
-            uploadRpm = uRpm;
-
-            testDownload = speed(down);
-            testUpload = speed(up);
-
-            if (latency != null && latency > 0) {
-              testPing = '$latency ms';
-            }
-          });
-        } catch (e) {
-          debugPrint(
-            'Network quality error: $e',
-          );
-        }
-      },
-      onError: (Object error) {
-        debugPrint(
-          'Network quality stream error: $error',
-        );
-
-        if (!mounted) return;
-
-        setState(() {
-          networkTestRunning = false;
-        });
-      },
-    );
-
-    // ------------------------------------------------------------------------
-    // STUN
-    // ------------------------------------------------------------------------
-
-    stunSub = vpn.stunProgressStream.listen(
-      (progress) {
-        if (!mounted) return;
-
-        try {
-          final dynamic p = progress;
-
-          final running =
-              _dynamicBool(
-                    p,
-                    'isRunning',
-                  ) ??
-                  false;
-
-          final latency = _dynamicInt(
-            p,
-            'latencyMs',
-          );
-
-          final ip = _dynamicString(
-            p,
-            'externalIp',
-          );
-
-          final nat = _dynamicString(
-            p,
-            'natType',
-          );
-
-          setState(() {
-            stunTestRunning = running;
-
-            if (latency != null && latency > 0) {
-              stunLatency = '$latency ms';
-            }
-
-            if (ip != null && ip.isNotEmpty) {
-              externalIp = ip;
-            }
-
-            if (nat != null && nat.isNotEmpty) {
-              natType = nat;
-            }
-          });
-        } catch (e) {
-          debugPrint('STUN error: $e');
-        }
-      },
-      onError: (Object error) {
-        debugPrint(
-          'STUN stream error: $error',
-        );
-
-        if (!mounted) return;
-        setState(() {
-          stunTestRunning = false;
-        });
-      },
-    );
-  }
-
-  dynamic _readDynamic(
-    dynamic object,
-    String property,
-  ) {
-    try {
-      if (property == 'isRunning') {
-        return object.isRunning;
-      }
-
-      if (property == 'downloadCapacityBps') {
-        return object.downloadCapacityBps;
-      }
-
-      if (property == 'uploadCapacityBps') {
-        return object.uploadCapacityBps;
-      }
-
-      if (property == 'idleLatencyMs') {
-        return object.idleLatencyMs;
-      }
-
-      if (property == 'downloadRPM') {
-        return object.downloadRPM;
-      }
-
-      if (property == 'uploadRPM') {
-        return object.uploadRPM;
-      }
-
-      if (property == 'latencyMs') {
-        return object.latencyMs;
-      }
-
-      if (property == 'externalIp') {
-        return object.externalIp;
-      }
-
-      if (property == 'natType') {
-        return object.natType;
-      }
-    } catch (_) {}
-
-    return null;
-  }
-
-  bool? _dynamicBool(
-    dynamic object,
-    String property,
-  ) {
-    final value = _readDynamic(
-      object,
-      property,
-    );
-
-    return value is bool ? value : null;
-  }
-
-  num? _dynamicNum(
-    dynamic object,
-    String property,
-  ) {
-    final value = _readDynamic(
-      object,
-      property,
-    );
-
-    return value is num ? value : null;
-  }
-
-  int? _dynamicInt(
-    dynamic object,
-    String property,
-  ) {
-    final value = _readDynamic(
-      object,
-      property,
-    );
-
-    if (value is int) return value;
-
-    if (value is num) {
-      return value.toInt();
+  String _stateText(String s) {
+    if (s.contains('started') ||
+        s.contains('running') ||
+        s.contains('connected')) {
+      return 'VPN متصل است';
     }
-
-    return null;
+    if (s.contains('starting')) return 'در حال اتصال...';
+    if (s.contains('stopping')) return 'در حال قطع اتصال...';
+    return 'VPN متوقف است';
   }
 
-  String? _dynamicString(
-    dynamic object,
-    String property,
-  ) {
-    final value = _readDynamic(
-      object,
-      property,
-    );
-
-    if (value == null) return null;
-    return value.toString();
-  }
-
-  // ==========================================================================
-  // SAVED DATA
-  // ==========================================================================
-
-  Future<void> loadSaved() async {
+  Future<void> _loadSaved() async {
     try {
-      final prefs =
-          await SharedPreferences.getInstance();
+      final prefs = await SharedPreferences.getInstance();
 
-      final saved = prefs.getString(
-        'subscription_url',
-      );
+      final savedUrl = prefs.getString('subscription_url');
+      final savedMode = prefs.getString('selection_mode');
+      final savedRaw = prefs.getString('selected_server_raw');
 
-      final savedMode = prefs.getString(
-        'selection_mode',
-      );
+      selectionMode = savedMode == 'manual'
+          ? ServerSelectionMode.manual
+          : ServerSelectionMode.auto;
 
-      final savedServer = prefs.getString(
-        'selected_server_raw',
-      );
-
-      final savedLastUpdate = prefs.getString(
-        'last_update',
-      );
-
-      selectionMode =
-          savedMode == 'manual'
-              ? ServerSelectionMode.manual
-              : ServerSelectionMode.auto;
-
-      lastUpdate = savedLastUpdate;
-
-      if (saved != null && saved.isNotEmpty) {
-        url.text = saved;
-
+      if (savedUrl != null && savedUrl.isNotEmpty) {
+        urlController.text = savedUrl;
         await loadSubscription(
           silent: true,
-          restoreSelectedRaw: savedServer,
+          restoreRaw: savedRaw,
         );
       }
 
       await _syncVpnState();
     } catch (e) {
-      debugPrint('loadSaved: $e');
+      debugPrint('load saved error: $e');
     }
-  }
-
-  Future<void> saveSelectionMode() async {
-    final prefs =
-        await SharedPreferences.getInstance();
-
-    await prefs.setString(
-      'selection_mode',
-      selectionMode ==
-              ServerSelectionMode.manual
-          ? 'manual'
-          : 'auto',
-    );
-  }
-  Future<void> saveSelectedServer() async {
-    final prefs =
-        await SharedPreferences.getInstance();
-
-    if (selectedServer == null) {
-      await prefs.remove(
-        'selected_server_raw',
-      );
-      return;
-    }
-
-    await prefs.setString(
-      'selected_server_raw',
-      selectedServer!.raw,
-    );
-  }
-
-  // ==========================================================================
-  // SUBSCRIPTION
-  // ==========================================================================
-  Future<void> addSubscription() async {
-    final controller = TextEditingController(
-      text: url.text,
-    );
-
-    final result =
-        await showDialog<String>(
-      context: context,
-      builder: (context) {
-        return Directionality(
-          textDirection: TextDirection.rtl,
-          child: AlertDialog(
-            backgroundColor:
-                const Color(0xFF101522),
-            title: const Text(
-              'افزودن Subscription',
-            ),
-            content: TextField(
-              controller: controller,
-              autofocus: true,
-              textDirection:
-                  TextDirection.ltr,
-              keyboardType:
-                  TextInputType.url,
-              decoration:
-                  const InputDecoration(
-                hintText:
-                    'https://example.com/sub...',
-                border:
-                    OutlineInputBorder(),
-                prefixIcon:
-                    Icon(Icons.link),
-              ),
-            ),
-            actions: [
-              TextButton(
-                onPressed: () {
-                  Navigator.pop(
-                    context,
-                  );
-                },
-                child: const Text(
-                  'لغو',
-                ),
-              ),
-              FilledButton(
-                onPressed: () {
-                  final value =
-                      controller.text.trim();
-
-                  if (value.isEmpty) {
-                    return;
-                  }
-
-                  Navigator.pop(
-                    context,
-                    value,
-                  );
-                },
-                child: const Text(
-                  'افزودن',
-                ),
-              ),
-            ],
-          ),
-        );
-      },
-    );
-
-    controller.dispose();
-
-    if (result == null ||
-        result.trim().isEmpty) {
-      return;
-    }
-
-    url.text = result.trim();
-
-    await loadSubscription();
   }
 
   Future<void> loadSubscription({
     bool silent = false,
-    String? restoreSelectedRaw,
+    String? restoreRaw,
   }) async {
-    final subscription = url.text.trim();
+    final value = urlController.text.trim();
 
-    if (subscription.isEmpty) {
-      if (!silent && mounted) {
-        snack(
-          'ابتدا Subscription را اضافه کن',
-        );
-      }
+    if (value.isEmpty) {
+      if (!silent) _show('ابتدا Subscription را وارد کن');
       return;
     }
 
     Uri uri;
-
     try {
-      uri = Uri.parse(subscription);
-
-      if (!uri.hasScheme ||
-          uri.host.isEmpty) {
-        throw Exception(
-          'آدرس Subscription معتبر نیست',
-        );
+      uri = Uri.parse(value);
+      if (!uri.hasScheme || uri.host.isEmpty) {
+        throw const FormatException();
       }
     } catch (_) {
-      if (!silent && mounted) {
-        snack(
-          'آدرس Subscription نامعتبر است',
-        );
-      }
+      if (!silent) _show('آدرس Subscription معتبر نیست');
       return;
     }
 
-    if (mounted) {
-      setState(() {
-        loading = true;
-
-        if (!silent) {
-          stateText =
-              'در حال دریافت Subscription...';
-        }
-      });
-    }
+    setState(() {
+      loading = true;
+      status = 'در حال دریافت Subscription...';
+    });
 
     try {
-      final response = await http
-          .get(
+      final response = await http.get(
         uri,
         headers: const {
-          'User-Agent':
-              'LightSpeed/6.0',
+          'User-Agent': 'LightSpeed/7.0',
           'Accept': '*/*',
-          'Cache-Control':
-              'no-cache',
+          'Cache-Control': 'no-cache',
           'Pragma': 'no-cache',
         },
-      )
-          .timeout(
-        const Duration(
-          seconds: 60,
-        ),
-      );
+      ).timeout(const Duration(seconds: 60));
 
-      if (response.statusCode < 200 ||
-          response.statusCode >= 300) {
-        throw Exception(
-          'HTTP ${response.statusCode}',
-        );
-      }
-
-      if (response.bodyBytes.isEmpty) {
-        throw Exception(
-          'Subscription خالی است',
-        );
+      if (response.statusCode < 200 || response.statusCode >= 300) {
+        throw Exception('HTTP ${response.statusCode}');
       }
 
       final body = utf8.decode(
@@ -805,72 +291,39 @@ class _HomePageState extends State<HomePage>
         allowMalformed: true,
       );
 
-      _readUserInfo(
-        responseHeader(
-          response.headers,
-          'subscription-userinfo',
-        ),
-      );
+      _parseUserInfo(_header(response.headers, 'subscription-userinfo'));
 
-      final rawLines =
-          decodeSubscription(body);
+      final lines = decodeSubscription(body);
+      final parsed = <ServerNode>[];
+      final fingerprints = <String>{};
 
-      final parsed = <Server>[];
-
-      final fingerprints =
-          <String>{};
-
-      for (final line in rawLines) {
-        final server = parseServer(line);
-
-        if (server == null) {
-          continue;
-        }
-
-        final key =
-            _serverFingerprint(server);
-        if (fingerprints.add(key)) {
-          parsed.add(server);
+      for (final line in lines) {
+        final node = parseNode(line);
+        if (node == null) continue;
+        final fp = '${node.type}|${node.host}|${node.port}|${node.raw}';
+        if (fingerprints.add(fp)) {
+          parsed.add(node);
         }
       }
 
       if (parsed.isEmpty) {
-        throw Exception(
-          'هیچ کانفیگ معتبر و قابل استفاده‌ای پیدا نشد',
-        );
+        throw Exception('هیچ کانفیگ قابل استفاده‌ای پیدا نشد');
       }
 
-      final prefs =
-          await SharedPreferences.getInstance();
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString('subscription_url', value);
 
-      await prefs.setString(
-        'subscription_url',
-        subscription,
-      );
+      final now = DateTime.now().toIso8601String();
+      await prefs.setString('last_update', now);
 
-      final updateTime =
-          DateTime.now()
-              .toLocal()
-              .toIso8601String();
+      ServerNode? restored;
+      final wantedRaw = restoreRaw ??
+          prefs.getString('selected_server_raw');
 
-      await prefs.setString(
-        'last_update',
-        updateTime,
-      );
-
-      Server? restored;
-
-      final rawToRestore =
-          restoreSelectedRaw ??
-              prefs.getString(
-                'selected_server_raw',
-              );
-
-      if (rawToRestore != null) {
-        for (final server in parsed) {
-          if (server.raw ==
-              rawToRestore) {
-            restored = server;
+      if (wantedRaw != null) {
+        for (final node in parsed) {
+          if (node.raw == wantedRaw) {
+            restored = node;
             break;
           }
         }
@@ -882,1395 +335,818 @@ class _HomePageState extends State<HomePage>
         servers
           ..clear()
           ..addAll(parsed);
-
         selectedServer = restored;
-
-        lastUpdate = updateTime;
-
+        lastUpdate = now;
         loading = false;
-
-        stateText =
-            '${servers.length} سرور دریافت شد';
+        status = '${servers.length} سرور دریافت شد';
       });
 
-      await saveSelectedServer();
-
-      if (!silent) {
-        snack(
-          '${servers.length} سرور با موفقیت دریافت شد',
-        );
-      }
-
-      if (selectionMode ==
-              ServerSelectionMode.auto &&
-          !silent) {
-        await testAll(
-          silent: true,
-        );
-
-        final best = fastest();
-
-        if (mounted && best != null) {
-          setState(() {
-            selectedServer = best;
-          });
-
-          await saveSelectedServer();
+      if (selectionMode == ServerSelectionMode.auto) {
+        await testAll(silent: true);
+        final best = fastestServer();
+        if (best != null && mounted) {
+          setState(() => selectedServer = best);
+          await _saveSelected();
         }
       }
-    } catch (e) {
-      debugPrint(
-        'SUB ERROR: $e',
-      );
-
-      if (!mounted) return;
-
-      setState(() {
-        loading = false;
-        stateText =
-            'خطا در دریافت Subscription';
-      });
 
       if (!silent) {
-        snack(
-          'دریافت Subscription ناموفق بود:\n$e',
-        );
+        _show('${servers.length} سرور دریافت شد');
       }
+    } catch (e) {
+      debugPrint('Subscription error: $e');
+      if (!mounted) return;
+      setState(() {
+        loading = false;
+        status = 'خطا در دریافت Subscription';
+      });
+      if (!silent) _show('دریافت Subscription ناموفق بود:\n$e');
     }
   }
 
-  String? responseHeader(
-    Map<String, String> headers,
-    String wanted,
-  ) {
+  String? _header(Map<String, String> headers, String wanted) {
     final target = wanted.toLowerCase();
-
     for (final entry in headers.entries) {
-      if (entry.key.toLowerCase() ==
-          target) {
+      if (entry.key.toLowerCase() == target) {
         return entry.value;
       }
     }
-
     return null;
   }
-  // ==========================================================================
-  // USER INFO
-  // ==========================================================================
 
-  void _readUserInfo(String? raw) {
-    if (raw == null ||
-        raw.trim().isEmpty) {
-      return;
-    }
+  void _parseUserInfo(String? raw) {
+    if (raw == null || raw.trim().isEmpty) return;
 
-    final values = <String, int>{};
-
+    final map = <String, int>{};
     for (final item in raw.split(';')) {
-      final index = item.indexOf('=');
+      final i = item.indexOf('=');
+      if (i <= 0) continue;
 
-      if (index <= 0) continue;
-
-      final key = item
-          .substring(0, index)
-          .trim()
-          .toLowerCase();
-
+      final key = item.substring(0, i).trim().toLowerCase();
       final value = int.tryParse(
-        item
-            .substring(index + 1)
-            .trim(),
+        item.substring(i + 1).trim(),
       );
-
       if (value == null) continue;
 
-      if (key == 'upload') {
-        values['upload'] = value;
+      if (key == 'upload') map['upload'] = value;
+      if (key == 'download') map['download'] = value;
+      if (key == 'total' || key == 'transfer_enable') {
+        map['total'] = value;
       }
-
-      if (key == 'download') {
-        values['download'] = value;
-      }
-
-      if (key == 'total' ||
-          key == 'transfer_enable') {
-        values['total'] = value;
-      }
-
-      if (key == 'expire' ||
-          key == 'expired_at') {
-        values['expire'] = value;
+      if (key == 'expire' || key == 'expired_at') {
+        map['expire'] = value;
       }
     }
 
     if (!mounted) return;
-
     setState(() {
-      if (values.containsKey('total')) {
-        totalBytes = values['total'];
-      }
-
-      if (values.containsKey('upload')) {
-        uploadBytes = values['upload'];
-      }
-
-      if (values.containsKey('download')) {
-        downloadBytes =
-            values['download'];
-      }
-
-      if (values.containsKey('upload') ||
-          values.containsKey('download')) {
-        usedBytes =
-            (uploadBytes ?? 0) +
-                (downloadBytes ?? 0);
-      }
-
-      if (values.containsKey('expire')) {
-        expireAt = values['expire'];
-      }
+      subscription.upload = map['upload'] ?? subscription.upload;
+      subscription.download =
+          map['download'] ?? subscription.download;
+      subscription.total = map['total'] ?? subscription.total;
+      subscription.expire = map['expire'] ?? subscription.expire;
     });
   }
 
-  // ==========================================================================
-  // SUBSCRIPTION DECODER
-  // ==========================================================================
-
-  List<String> decodeSubscription(
-    String body, {
-    int depth = 0,
-  }) {
+  List<String> decodeSubscription(String body) {
     final result = <String>[];
+    final visited = <String>{};
 
-    if (depth > 4) {
-      return result;
-    }
+    void addText(String text, int depth) {
+      if (depth > 4) return;
 
-    var trimmed =
-        body.replaceFirst('\uFEFF', '').trim();
-
-    if (trimmed.isEmpty) {
-      return result;
-    }
-
-    // ------------------------------------------------------------------------
-    // 1. Extract URI lines
-    // ------------------------------------------------------------------------
-
-    final directLines = _extractConfigLines(
-      trimmed,
-    );
-
-    result.addAll(directLines);
-
-    // ------------------------------------------------------------------------
-    // 2. JSON / sing-box JSON
-    // ------------------------------------------------------------------------
-
-    if (result.isEmpty &&
-        (trimmed.startsWith('{') ||
-            trimmed.startsWith('['))) {
-      result.addAll(
-        _decodeJsonSubscription(
-          trimmed,
-        ),
-      );
-    }
-
-    // ------------------------------------------------------------------------
-    // 3. Sometimes JSON is wrapped in whitespace/comments
-    // ------------------------------------------------------------------------
-
-    if (result.isEmpty) {
-      final jsonStart =
-          _findJsonStart(trimmed);
-
-      if (jsonStart >= 0) {
-        final possibleJson =
-            trimmed.substring(jsonStart);
-
-        result.addAll(
-          _decodeJsonSubscription(
-            possibleJson,
-          ),
-        );
-      }
-    }
-
-    // ------------------------------------------------------------------------
-    // 4. Base64 / URL-safe Base64
-    // ------------------------------------------------------------------------
-    if (result.isEmpty) {
-      final decoded =
-          _tryDecodeBase64Text(trimmed);
-
-      if (decoded != null &&
-          decoded.isNotEmpty &&
-          decoded.trim() != trimmed) {
-        result.addAll(
-          decodeSubscription(
-            decoded,
-            depth: depth + 1,
-          ),
-        );
-      }
-    }
-
-    // ------------------------------------------------------------------------
-    // 5. Final cleanup + deduplication
-    // ------------------------------------------------------------------------
-
-    final unique = <String>{};
-    final clean = <String>[];
-
-    for (final line in result) {
-      var value = line.trim();
-
-      if (value.isEmpty) {
-        continue;
-      }
-
-      value = value
+      final cleaned = text
           .replaceFirst('\uFEFF', '')
           .trim();
 
-      if (!_looksLikeConfig(value)) {
-        continue;
-      }
+      if (cleaned.isEmpty || !visited.add(cleaned)) return;
 
-      if (unique.add(value)) {
-        clean.add(value);
-      }
-    }
+      for (final line in cleaned.split(RegExp(r'\r?\n'))) {
+        final value = line.trim();
+        if (value.isEmpty) continue;
 
-    return clean;
-  }
-
-  List<String> _extractConfigLines(
-    String text,
-  ) {
-    final result = <String>[];
-
-    final lines = text
-        .replaceAll('\r\n', '\n')
-        .replaceAll('\r', '\n')
-        .split('\n');
-
-    for (var line in lines) {
-      var value = line.trim();
-
-      if (value.isEmpty) {
-        continue;
-      }
-      value = value.replaceFirst(
-        '\uFEFF',
-        '',
-      );
-
-      // Remove simple surrounding quotes.
-      if (value.length >= 2 &&
-          ((value.startsWith('"') &&
-                  value.endsWith('"')) ||
-              (value.startsWith("'") &&
-                  value.endsWith("'")))) {
-        value = value.substring(
-          1,
-          value.length - 1,
-        );
-      }
-
-      value = value.trim();
-
-      if (_looksLikeConfig(value)) {
-        result.add(value);
-        continue;
-      }
-
-      // Some subscription responses may contain
-      // multiple URI links separated by spaces.
-      final fragments =
-          value.split(RegExp(r'\s+'));
-
-      for (final fragment in fragments) {
-        final candidate = fragment.trim();
-
-        if (_looksLikeConfig(candidate)) {
-          result.add(candidate);
+        if (looksLikeNode(value)) {
+          result.add(value);
         }
       }
-    }
 
-    return result;
-  }
+      final normalized = cleaned.replaceAll(RegExp(r'\s+'), '');
+      final candidates = <String>[cleaned, normalized];
 
-  int _findJsonStart(String value) {
-    final objectIndex = value.indexOf('{');
-    final arrayIndex = value.indexOf('[');
-
-    if (objectIndex < 0) {
-      return arrayIndex;
-    }
-
-    if (arrayIndex < 0) {
-      return objectIndex;
-    }
-
-    return objectIndex < arrayIndex
-        ? objectIndex
-        : arrayIndex;
-  }
-
-  bool _looksLikeConfig(
-    String value,
-  ) {
-    final low =
-        value.trim().toLowerCase();
-
-    return low.startsWith('vmess://') ||
-        low.startsWith('vless://') ||
-        low.startsWith('trojan://') ||
-        low.startsWith('ss://') ||
-        low.startsWith('shadowsocks://') ||
-        low.startsWith('hysteria2://') ||
-        low.startsWith('hy2://') ||
-        low.startsWith('tuic://') ||
-        low.startsWith('socks://') ||
-        low.startsWith('socks5://') ||
-        low.startsWith('singbox-json://');
-  }
-
-  String? _tryDecodeBase64Text(
-    String value,
-  ) {
-    try {
-      var encoded = value
-          .replaceAll(
-            RegExp(r'\s+'),
-            '',
-          )
-          .trim();
-
-      if (encoded.isEmpty) {
-        return null;
-      }
-
-      // Ignore data that obviously isn't Base64.
-      if (!RegExp(
-        r'^[A-Za-z0-9+/_=-]+$',
-      ).hasMatch(encoded)) {
-        return null;
-      }
-
-      encoded = encoded
-          .replaceAll('-', '+')
-          .replaceAll('_', '/');
-
-      encoded += '=' *
-          ((4 - encoded.length % 4) % 4);
-
-      final bytes =
-          base64.decode(encoded);
-
-      final text = utf8.decode(
-        bytes,
-        allowMalformed: true,
-      );
-
-      if (text.trim().isEmpty) {
-        return null;
-      }
-
-      return text;
-    } catch (_) {
-      return null;
-    }
-  }
-
-  // ==========================================================================
-  // JSON SUBSCRIPTION
-  // ==========================================================================
-
-  List<String> _decodeJsonSubscription(
-    String body,
-  ) {
-    final result = <String>[];
-
-    try {
-      final decoded =
-          jsonDecode(body);
-
-      _extractJsonConfigs(
-        decoded,
-        result,
-      );
-    } catch (e) {
-      debugPrint(
-        'JSON subscription error: $e',
-      );
-    }
-    return result;
-  }
-
-  void _extractJsonConfigs(
-    dynamic object,
-    List<String> result,
-  ) {
-    if (object is List) {
-      for (final item in object) {
-        _extractJsonConfigs(
-          item,
-          result,
-        );
-      }
-
-      return;
-    }
-
-    if (object is! Map) {
-      return;
-    }
-
-    // ------------------------------------------------------------------------
-    // Common JSON subscription fields
-    // ------------------------------------------------------------------------
-
-    final possibleLinks = [
-      object['url'],
-      object['uri'],
-      object['link'],
-      object['config'],
-      object['server'],
-    ];
-
-    for (final value in possibleLinks) {
-      if (value is String) {
-        final candidate =
-            value.trim();
-
-        if (_looksLikeConfig(candidate)) {
-          result.add(candidate);
-        }
-      }
-    }
-
-    // ------------------------------------------------------------------------
-    // Common "links" array
-    // ------------------------------------------------------------------------
-
-    final links = object['links'];
-
-    if (links is List) {
-      for (final link in links) {
-        if (link is String) {
-          final candidate =
-              link.trim();
-
-          if (_looksLikeConfig(
-              candidate,
-          )) {
-            result.add(candidate);
-          }
-        } else {
-          _extractJsonConfigs(
-            link,
-            result,
-          );
-        }
-      }
-    }
-
-    // ------------------------------------------------------------------------
-    // sing-box outbounds
-    // ------------------------------------------------------------------------
-
-    final outbounds =
-        object['outbounds'];
-
-    if (outbounds is List) {
-      for (final outbound in outbounds) {
-        if (outbound is Map) {
-          final converted =
-              _singboxOutboundToServer(
-            Map<String, dynamic>.from(
-              outbound,
+      for (final candidate in candidates) {
+        try {
+          final decoded = utf8.decode(
+            base64Url.decode(
+              base64Url.normalize(candidate),
             ),
+            allowMalformed: true,
           );
 
-          if (converted != null) {
-            result.add(converted);
+          if (decoded.trim() != cleaned) {
+            addText(decoded, depth + 1);
           }
-        }
+        } catch (_) {}
       }
     }
 
-    // ------------------------------------------------------------------------
-    // Generic recursive JSON search
-    // ------------------------------------------------------------------------
-
-    for (final value in object.values) {
-      if (value is Map ||
-          value is List) {
-        _extractJsonConfigs(
-          value,
-          result,
-        );
-      }
-    }
+    addText(body, 0);
+    return result.toSet().toList();
   }
 
-  String? _singboxOutboundToServer(
-    Map<String, dynamic> outbound,
-  ) {
-    final type =
-        '${outbound['type'] ?? ''}'
-            .toLowerCase();
-
-    final host =
-        '${outbound['server'] ?? ''}';
-
-    final port = _toInt(
-      outbound['server_port'],
-    );
-
-    if (host.isEmpty ||
-        port <= 0) {
-      return null;
-    }
-
-    if (![
-      'vless',
-      'vmess',
-      'trojan',
-      'shadowsocks',
-      'ss',
-      'hysteria2',
-      'tuic',
-      'socks',
-      'socks5',
-    ].contains(type)) {
-      return null;
-    }
-
-    final copy =
-        Map<String, dynamic>.from(
-      outbound,
-    );
-
-    copy['server'] = host;
-    copy['server_port'] = port;
-
-    return 'singbox-json://${base64UrlEncode(
-      utf8.encode(
-        jsonEncode(copy),
-      ),
-    )}';
+  bool looksLikeNode(String value) {
+    final lower = value.toLowerCase();
+    return lower.startsWith('vless://') ||
+        lower.startsWith('vmess://') ||
+        lower.startsWith('trojan://') ||
+        lower.startsWith('ss://') ||
+        lower.startsWith('hysteria2://') ||
+        lower.startsWith('hy2://') ||
+        lower.startsWith('tuic://');
   }
 
-  // ==========================================================================
-  // SERVER PARSER
-  // ==========================================================================
-
-  Server? parseServer(
-    String raw,
-  ) {
+  ServerNode? parseNode(String raw) {
     try {
-      if (raw.startsWith(
-        'singbox-json://',
-      )) {
-        return _parseSingboxInternal(
-          raw,
-        );
+      final uri = Uri.parse(raw.trim());
+      final scheme = uri.scheme.toLowerCase();
+
+      switch (scheme) {
+        case 'vless':
+          return _parseVless(uri, raw);
+        case 'vmess':
+          return _parseVmess(raw);
+        case 'trojan':
+          return _parseTrojan(uri, raw);
+        case 'ss':
+          return _parseShadowsocks(uri, raw);
+        case 'hysteria2':
+        case 'hy2':
+          return _parseHysteria2(uri, raw);
+        case 'tuic':
+          return _parseTuic(uri, raw);
+        default:
+          return null;
       }
-
-      final uri = Uri.parse(raw);
-
-      final scheme =
-          uri.scheme.toLowerCase();
-
-      if (scheme == 'vmess') {
-        return parseVmess(raw);
-      }
-
-      if (scheme == 'vless') {
-        return _parseVless(raw);
-      }
-
-      if (scheme == 'trojan') {
-        return _parseTrojan(raw);
-      }
-
-      if (scheme == 'ss' ||
-          scheme == 'shadowsocks') {
-        return _parseShadowsocks(
-          raw,
-        );
-      }
-
-      if (scheme == 'hysteria2' ||
-          scheme == 'hy2') {
-        return _parseHysteria2(
-          raw,
-        );
-      }
-
-      if (scheme == 'tuic') {
-        return _parseTuic(raw);
-      }
-
-      if (scheme == 'socks' ||
-          scheme == 'socks5') {
-        return _parseSocks(raw);
-      }
-
-      return null;
     } catch (e) {
-      debugPrint(
-        'parseServer: $e',
-      );
-
+      debugPrint('parse node error: $e');
       return null;
     }
   }
 
-  Server? _parseSingboxInternal(
-    String raw,
-  ) {
-    try {
-      final encoded =
-          raw.substring(
-        'singbox-json://'.length,
-      );
+  ServerNode? _parseVless(Uri uri, String raw) {
+    final host = uri.host;
+    final port = uri.port;
+    final uuid = uri.userInfo;
 
-      final decoded =
-          utf8.decode(
-        base64Url.decode(
-          base64Url.normalize(
-            encoded,
-          ),
-        ),
-      );
+    if (host.isEmpty || port <= 0 || uuid.isEmpty) return null;
 
-      final map =
-          Map<String, dynamic>.from(
-        jsonDecode(decoded),
-      );
-
-      final host =
-          '${map['server'] ?? ''}';
-
-      final port = _toInt(
-        map['server_port'],
-      );
-
-      final type =
-          '${map['type'] ?? ''}'
-              .toUpperCase();
-
-      if (host.isEmpty ||
-          port <= 0 ||
-          type.isEmpty) {
-        return null;
-      }
-
-      final tag =
-          '${map['tag'] ?? ''}';
-
-      return Server(
-        raw: raw,
-        name: tag.isNotEmpty
-            ? tag
-            : '$type $host',
-        type: type,
-        host: host,
-        port: port,
-        outbound:
-            Map<String, dynamic>.from(
-          map,
-        ),
-      );
-    } catch (e) {
-      debugPrint(
-        'sing-box JSON parse error: $e',
-      );
-
-      return null;
-    }
-  }
-
-  // ==========================================================================
-  // VMESS
-  // ==========================================================================
-
-  Server? parseVmess(
-    String raw,
-  ) {
-    try {
-      var encoded =
-          raw.substring(
-        raw.indexOf('://') + 3,
-      );
-
-      encoded = encoded
-          .replaceAll('-', '+')
-          .replaceAll('_', '/');
-
-      encoded += '=' *
-          ((4 - encoded.length % 4) % 4);
-
-      final decoded = utf8.decode(
-        base64.decode(encoded),
-        allowMalformed: true,
-      );
-
-      final map =
-          Map<String, dynamic>.from(
-        json.decode(decoded),
-      );
-
-      final host =
-          '${map['add'] ?? ''}'
-              .trim();
-
-      final port =
-          _toInt(map['port']);
-
-      final uuid =
-          '${map['id'] ?? ''}'
-              .trim();
-
-      if (host.isEmpty ||
-          port <= 0 ||
-          uuid.isEmpty) {
-        return null;
-      }
-      final outbound =
-          <String, dynamic>{
-        'type': 'vmess',
-        'tag': 'proxy',
-        'server': host,
-        'server_port': port,
-        'uuid': uuid,
-        'security':
-            '${map['scy'] ?? 'auto'}',
-      };
-
-      final tls =
-          '${map['tls'] ?? ''}'
-              .toLowerCase();
-
-      final sni =
-          '${map['sni'] ?? map['host'] ?? ''}';
-
-      if (tls.isNotEmpty &&
-          tls != 'none') {
-        outbound['tls'] = {
-          'enabled': true,
-          if (sni.isNotEmpty)
-            'server_name': sni,
-        };
-      }
-
-      addTransport(
-        outbound,
-        '${map['net'] ?? 'tcp'}',
-        '${map['path'] ?? ''}',
-        '${map['host'] ?? ''}',
-      );
-
-      return Server(
-        raw: raw,
-        name:
-            '${map['ps'] ?? 'VMess'}',
-        type: 'VMESS',
-        host: host,
-        port: port,
-        outbound: outbound,
-      );
-    } catch (e) {
-      debugPrint(
-        'VMess parse error: $e',
-      );
-
-      return null;
-    }
-  }
-
-  // ==========================================================================
-  // VLESS
-  // ==========================================================================
-
-  Server? _parseVless(
-    String raw,
-  ) {
-    final uri = Uri.parse(raw);
-
-    if (uri.host.isEmpty ||
-        !uri.hasPort ||
-        uri.userInfo.isEmpty) {
-      return null;
-    }
-
-    final outbound = vless(uri);
-
-    return Server(
-      raw: raw,
-      name: _uriName(
-        uri,
-        'VLESS',
-      ),
-      type: 'VLESS',
-      host: uri.host,
-      port: uri.port,
-      outbound: outbound,
-    );
-  }
-
-  Map<String, dynamic> vless(
-    Uri uri,
-  ) {
-    final p = uri.queryParameters;
-
-    final outbound =
-        <String, dynamic>{
+    final q = uri.queryParameters;
+    final outbound = <String, dynamic>{
       'type': 'vless',
       'tag': 'proxy',
-      'server': uri.host,
-      'server_port': uri.port,
-      'uuid': uri.userInfo,
+      'server': host,
+      'server_port': port,
+      'uuid': uuid,
     };
 
-    final flow = p['flow'] ?? '';
+    _applyCommonOptions(outbound, q);
 
-    if (flow.isNotEmpty) {
+    // VLESS Reality/Vision profiles commonly carry
+    // flow=xtls-rprx-vision.
+    final flow = q['flow'];
+    if (flow != null && flow.isNotEmpty) {
       outbound['flow'] = flow;
     }
 
-    final security =
-        (p['security'] ?? '')
-            .toLowerCase();
-
-    if (security == 'tls' ||
-        security == 'reality') {
-      final tls =
-          <String, dynamic>{
-        'enabled': true,
-        'server_name':
-            p['sni'] ??
-                p['host'] ??
-                uri.host,
-      };
-
-      final fp = p['fp'] ?? '';
-
-      if (fp.isNotEmpty) {
-        tls['utls'] = {
-          'enabled': true,
-          'fingerprint': fp,
-        };
-      }
-      if (security == 'reality' &&
-          (p['pbk'] ?? '').isNotEmpty) {
-        tls['reality'] = {
-          'enabled': true,
-          'public_key': p['pbk'],
-          if ((p['sid'] ?? '')
-              .isNotEmpty)
-            'short_id': p['sid'],
-        };
-      }
-
-      outbound['tls'] = tls;
+    final packetEncoding =
+        q['packetEncoding'] ?? q['packet_encoding'];
+    if (packetEncoding != null && packetEncoding.isNotEmpty) {
+      outbound['packet_encoding'] = packetEncoding;
     }
 
-    addTransport(
-      outbound,
-      p['type'] ??
-          p['network'] ??
-          'tcp',
-      p['path'] ?? '',
-      p['host'] ?? '',
-    );
-
-    return outbound;
-  }
-
-  // ==========================================================================
-  // TROJAN
-  // ==========================================================================
-
-  Server? _parseTrojan(
-    String raw,
-  ) {
-    final uri = Uri.parse(raw);
-
-    if (uri.host.isEmpty ||
-        !uri.hasPort ||
-        uri.userInfo.isEmpty) {
-      return null;
-    }
-
-    final outbound = trojan(uri);
-
-    return Server(
+    return ServerNode(
       raw: raw,
-      name: _uriName(
-        uri,
-        'TROJAN',
-      ),
-      type: 'TROJAN',
-      host: uri.host,
-      port: uri.port,
+      name: _nodeName(uri, 'VLESS'),
+      type: 'VLESS',
+      host: host,
+      port: port,
       outbound: outbound,
     );
   }
 
-  Map<String, dynamic> trojan(
-    Uri uri,
-  ) {
-    final p = uri.queryParameters;
+  ServerNode? _parseVmess(String raw) {
+    var encoded = raw.substring('vmess://'.length).trim();
+    encoded = Uri.decodeComponent(encoded);
 
-    final outbound =
-        <String, dynamic>{
+    final jsonText = utf8.decode(
+      base64Url.decode(base64Url.normalize(encoded)),
+      allowMalformed: true,
+    );
+
+    final data = jsonDecode(jsonText);
+    if (data is! Map) return null;
+
+    final host = '${data['add'] ?? ''}'.trim();
+    final port = int.tryParse('${data['port'] ?? ''}') ?? 0;
+    final id = '${data['id'] ?? ''}'.trim();
+
+    if (host.isEmpty || port <= 0 || id.isEmpty) return null;
+
+    final q = <String, String>{};
+    for (final entry in data.entries) {
+      q[entry.key.toString()] = '${entry.value ?? ''}';
+    }
+
+    final outbound = <String, dynamic>{
+      'type': 'vmess',
+      'tag': 'proxy',
+      'server': host,
+      'server_port': port,
+      'uuid': id,
+      'security': (data['scy'] ?? 'auto').toString(),
+    };
+
+    final aid = int.tryParse('${data['aid'] ?? '0'}');
+    if (aid != null) outbound['alter_id'] = aid;
+
+    _applyVmessOptions(outbound, q);
+
+    final packetEncoding =
+        q['packetEncoding'] ?? q['packet_encoding'];
+    if (packetEncoding != null && packetEncoding.isNotEmpty) {
+      outbound['packet_encoding'] = packetEncoding;
+    }
+
+    return ServerNode(
+      raw: raw,
+      name: '${data['ps'] ?? 'VMess'}'.trim().isEmpty
+          ? 'VMess'
+          : '${data['ps']}'.trim(),
+      type: 'VMess',
+      host: host,
+      port: port,
+      outbound: outbound,
+    );
+  }
+
+  ServerNode? _parseTrojan(Uri uri, String raw) {
+    if (uri.host.isEmpty ||
+        uri.port <= 0 ||
+        uri.userInfo.isEmpty) {
+      return null;
+    }
+
+    final q = uri.queryParameters;
+    final outbound = <String, dynamic>{
       'type': 'trojan',
       'tag': 'proxy',
       'server': uri.host,
       'server_port': uri.port,
       'password': uri.userInfo,
-      'tls': {
-        'enabled': true,
-        'server_name':
-            p['sni'] ??
-                p['host'] ??
-                uri.host,
-      },
     };
 
-    if (p['allowInsecure'] == '1' ||
-        p['allow_insecure'] == '1' ||
-        p['insecure'] == '1') {
-      (outbound['tls']
-          as Map<String, dynamic>)['insecure'] =
-          true;
-    }
+    _applyCommonOptions(outbound, q);
 
-    addTransport(
-      outbound,
-      p['type'] ?? 'tcp',
-      p['path'] ?? '',
-      p['host'] ?? '',
-    );
-
-    return outbound;
-  }
-
-  // ==========================================================================
-  // SHADOWSOCKS
-  // ==========================================================================
-
-  Server? _parseShadowsocks(
-    String raw,
-  ) {
-    final uri = Uri.parse(raw);
-
-    if (uri.host.isEmpty ||
-        !uri.hasPort) {
-      return null;
-    }
-
-    final outbound =
-        shadowsocks(
-      uri,
-      raw,
-    );
-
-    if (outbound == null) {
-      return null;
-    }
-
-    return Server(
+    return ServerNode(
       raw: raw,
-      name: _uriName(
-        uri,
-        'SS',
-      ),
-      type: 'SS',
+      name: _nodeName(uri, 'Trojan'),
+      type: 'Trojan',
       host: uri.host,
       port: uri.port,
       outbound: outbound,
     );
   }
 
-  Map<String, dynamic>?
-      shadowsocks(
-    Uri uri,
-    String raw,
-  ) {
+  ServerNode? _parseShadowsocks(Uri uri, String raw) {
+    if (uri.host.isEmpty || uri.port <= 0) return null;
+
+    String userInfo = uri.userInfo;
+    if (userInfo.isEmpty) {
+      try {
+        final decoded = utf8.decode(
+          base64Url.decode(base64Url.normalize(uri.host)),
+        );
+        final parts = decoded.split(':');
+        if (parts.length == 2) {
+          final method = parts[0];
+          final password = parts[1];
+
+          return ServerNode(
+            raw: raw,
+            name: _nodeName(uri, 'Shadowsocks'),
+            type: 'Shadowsocks',
+            host: uri.host,
+            port: uri.port,
+            outbound: {
+              'type': 'shadowsocks',
+              'tag': 'proxy',
+              'server': uri.host,
+              'server_port': uri.port,
+              'method': method,
+              'password': password,
+            },
+          );
+        }
+      } catch (_) {}
+    }
+
+    String method = '';
+    String password = '';
+
     try {
-      var user = uri.userInfo;
-
-      // ss://BASE64@host:port
-      if (user.isEmpty) {
-        var encoded =
-            raw.substring(
-          raw.indexOf('://') + 3,
-        );
-        encoded =
-            encoded.split('#').first;
-
-        encoded =
-            encoded.split('?').first;
-
-        encoded = encoded
-            .replaceAll('-', '+')
-            .replaceAll('_', '/');
-
-        encoded += '=' *
-            ((4 -
-                    encoded.length % 4) %
-                4);
-
-        user = utf8.decode(
-          base64.decode(encoded),
-          allowMalformed: true,
-        );
+      final decoded = utf8.decode(
+        base64Url.decode(base64Url.normalize(userInfo)),
+      );
+      final i = decoded.indexOf(':');
+      if (i > 0) {
+        method = decoded.substring(0, i);
+        password = decoded.substring(i + 1);
       }
-      final separator =
-          user.indexOf(':');
-
-      if (separator <= 0) {
-        return null;
+    } catch (_) {
+      final i = userInfo.indexOf(':');
+      if (i > 0) {
+        method = userInfo.substring(0, i);
+        password = userInfo.substring(i + 1);
       }
+    }
 
-      return {
+    if (method.isEmpty || password.isEmpty) return null;
+
+    return ServerNode(
+      raw: raw,
+      name: _nodeName(uri, 'Shadowsocks'),
+      type: 'Shadowsocks',
+      host: uri.host,
+      port: uri.port,
+      outbound: {
         'type': 'shadowsocks',
         'tag': 'proxy',
         'server': uri.host,
         'server_port': uri.port,
-        'method':
-            Uri.decodeComponent(
-          user.substring(
-            0,
-            separator,
-          ),
-        ),
-        'password':
-            Uri.decodeComponent(
-          user.substring(
-            separator + 1,
-          ),
-        ),
-      };
-    } catch (e) {
-      debugPrint(
-        'Shadowsocks parse error: $e',
-      );
-
-      return null;
-    }
+        'method': method,
+        'password': password,
+      },
+    );
   }
 
-  // ==========================================================================
-  // HYSTERIA 2
-  // ==========================================================================
-
-  Server? _parseHysteria2(
-    String raw,
-  ) {
-    final uri = Uri.parse(raw);
-
+  ServerNode? _parseHysteria2(Uri uri, String raw) {
     if (uri.host.isEmpty ||
-        !uri.hasPort ||
+        uri.port <= 0 ||
         uri.userInfo.isEmpty) {
       return null;
     }
 
-    return Server(
-      raw: raw,
-      name: _uriName(
-        uri,
-        'HYSTERIA2',
-      ),
-      type: 'HYSTERIA2',
-      host: uri.host,
-      port: uri.port,
-      outbound: hysteria2(uri),
-    );
-  }
-  Map<String, dynamic> hysteria2(
-    Uri uri,
-  ) {
-    final p = uri.queryParameters;
-
-    final outbound =
-        <String, dynamic>{
+    final q = uri.queryParameters;
+    final outbound = <String, dynamic>{
       'type': 'hysteria2',
       'tag': 'proxy',
       'server': uri.host,
       'server_port': uri.port,
       'password': uri.userInfo,
-      'tls': {
+      'tls': <String, dynamic>{
         'enabled': true,
-        'server_name':
-            p['sni'] ??
-                p['peer'] ??
-                uri.host,
-      },
-    };
-    if (p['insecure'] == '1') {
-      (outbound['tls']
-          as Map<String, dynamic>)['insecure'] =
-          true;
-    }
-
-    return outbound;
-  }
-
-  // ==========================================================================
-  // TUIC
-  // ==========================================================================
-
-  Server? _parseTuic(
-    String raw,
-  ) {
-    final uri = Uri.parse(raw);
-
-    if (uri.host.isEmpty ||
-        !uri.hasPort ||
-        uri.userInfo.isEmpty) {
-      return null;
-    }
-
-    return Server(
-      raw: raw,
-      name: _uriName(
-        uri,
-        'TUIC',
-      ),
-      type: 'TUIC',
-      host: uri.host,
-      port: uri.port,
-      outbound: tuic(uri),
-    );
-  }
-
-  Map<String, dynamic> tuic(
-    Uri uri,
-  ) {
-    final p = uri.queryParameters;
-    final outbound =
-        <String, dynamic>{
-      'type': 'tuic',
-      'tag': 'proxy',
-      'server': uri.host,
-      'server_port': uri.port,
-      'uuid': uri.userInfo,
-      'password':
-          p['password'] ?? '',
-      'congestion_control':
-          p['congestion_control'] ??
-              'cubic',
-      'udp_relay_mode':
-          p['udp_relay_mode'] ??
-              'native',
-      'zero_rtt_handshake': false,
-      'tls': {
-        'enabled': true,
-        'server_name':
-            p['sni'] ??
-                p['peer'] ??
-                uri.host,
       },
     };
 
-    if (p['insecure'] == '1') {
-      (outbound['tls']
-          as Map<String, dynamic>)['insecure'] =
-          true;
+    final tls = outbound['tls'] as Map<String, dynamic>;
+
+    if (q['sni']?.isNotEmpty == true) {
+      tls['server_name'] = q['sni'];
     }
 
-    return outbound;
-  }
-
-  // ==========================================================================
-  // SOCKS
-  // ==========================================================================
-
-  Server? _parseSocks(
-    String raw,
-  ) {
-    final uri = Uri.parse(raw);
-
-    if (uri.host.isEmpty ||
-        !uri.hasPort) {
-      return null;
+    if (q['insecure'] == '1' ||
+        q['allowInsecure'] == '1') {
+      tls['insecure'] = true;
     }
 
-    final outbound =
-        <String, dynamic>{
-      'type': 'socks',
-      'tag': 'proxy',
-      'server': uri.host,
-      'server_port': uri.port,
-      'version': '5',
-    };
-
-    if (uri.userInfo.isNotEmpty) {
-      final separator =
-          uri.userInfo.indexOf(':');
-
-      if (separator > 0) {
-        outbound['username'] =
-            Uri.decodeComponent(
-          uri.userInfo.substring(
-            0,
-            separator,
-          ),
-        );
-
-        outbound['password'] =
-            Uri.decodeComponent(
-          uri.userInfo.substring(
-            separator + 1,
-          ),
-        );
-      }
+    if (q['obfs']?.isNotEmpty == true) {
+      outbound['obfs'] = {
+        'type': q['obfs'],
+        if (q['obfs-password']?.isNotEmpty == true)
+          'password': q['obfs-password'],
+      };
     }
 
-    return Server(
+    return ServerNode(
       raw: raw,
-      name: _uriName(
-        uri,
-        'SOCKS',
-      ),
-      type: 'SOCKS',
+      name: _nodeName(uri, 'Hysteria2'),
+      type: 'Hysteria2',
       host: uri.host,
       port: uri.port,
       outbound: outbound,
     );
   }
 
-  // ==========================================================================
-  // TRANSPORT
-  // ==========================================================================
+  ServerNode? _parseTuic(Uri uri, String raw) {
+    if (uri.host.isEmpty ||
+        uri.port <= 0 ||
+        uri.userInfo.isEmpty) {
+      return null;
+    }
 
-  void addTransport(
+    final pieces = uri.userInfo.split(':');
+    if (pieces.length < 2) return null;
+
+    final q = uri.queryParameters;
+
+    final outbound = <String, dynamic>{
+      'type': 'tuic',
+      'tag': 'proxy',
+      'server': uri.host,
+      'server_port': uri.port,
+      'uuid': pieces[0],
+      'password': pieces.sublist(1).join(':'),
+      'tls': <String, dynamic>{
+        'enabled': true,
+      },
+    };
+
+    final tls = outbound['tls'] as Map<String, dynamic>;
+
+    if (q['sni']?.isNotEmpty == true) {
+      tls['server_name'] = q['sni'];
+    }
+
+    if (q['insecure'] == '1' ||
+        q['allow_insecure'] == '1') {
+      tls['insecure'] = true;
+    }
+
+    if (q['congestion_control']?.isNotEmpty == true) {
+      outbound['congestion_control'] =
+          q['congestion_control'];
+    }
+
+    return ServerNode(
+      raw: raw,
+      name: _nodeName(uri, 'TUIC'),
+      type: 'TUIC',
+      host: uri.host,
+      port: uri.port,
+      outbound: outbound,
+    );
+  }
+
+  void _applyCommonOptions(
     Map<String, dynamic> outbound,
-    String network,
-    String path,
-    String host,
+    Map<String, String> q,
   ) {
-    final n = network.toLowerCase();
+    final transport =
+        (q['type'] ?? q['network'] ?? '').toLowerCase();
 
-    if (n == 'ws' ||
-        n == 'websocket') {
+    final security =
+        (q['security'] ?? '').toLowerCase();
+
+    if (security == 'tls' || security == 'reality') {
+      final tls = <String, dynamic>{
+        'enabled': true,
+      };
+
+      if (q['sni']?.isNotEmpty == true) {
+        tls['server_name'] = q['sni'];
+      }
+
+      if (q['fp']?.isNotEmpty == true) {
+        tls['utls'] = {
+          'enabled': true,
+          'fingerprint': q['fp'],
+        };
+      }
+
+      if (q['allowInsecure'] == '1' ||
+          q['insecure'] == '1') {
+        tls['insecure'] = true;
+      }
+
+      if (security == 'reality') {
+        final publicKey = q['pbk'];
+        final shortId = q['sid'];
+
+        if (publicKey != null && publicKey.isNotEmpty) {
+          tls['reality'] = {
+            'enabled': true,
+            'public_key': publicKey,
+            if (shortId != null && shortId.isNotEmpty)
+              'short_id': shortId,
+          };
+        }
+      }
+
+      outbound['tls'] = tls;
+    }
+
+    if (transport == 'ws') {
       outbound['transport'] = {
         'type': 'ws',
-        'path':
-            path.isEmpty ? '/' : path,
-        if (host.isNotEmpty)
+        'path': q['path'] ?? '/',
+        if (q['host']?.isNotEmpty == true)
           'headers': {
-            'Host': host,
+            'Host': q['host'],
           },
       };
-
-      return;
-    }
-
-    if (n == 'grpc') {
+    } else if (transport == 'grpc') {
       outbound['transport'] = {
         'type': 'grpc',
-        'service_name': path,
+        'service_name':
+            q['serviceName'] ??
+            q['serviceName'.toLowerCase()] ??
+            '',
       };
-
-      return;
-    }
-
-    if (n == 'httpupgrade') {
+    } else if (transport == 'httpupgrade') {
       outbound['transport'] = {
         'type': 'httpupgrade',
-        'path':
-            path.isEmpty ? '/' : path,
-        if (host.isNotEmpty)
-          'host': host,
+        'path': q['path'] ?? '/',
+        if (q['host']?.isNotEmpty == true)
+          'host': q['host'],
       };
-
-      return;
-    }
-
-    if (n == 'h2' ||
-        n == 'http') {
+    } else if (transport == 'http' ||
+        transport == 'h2') {
       outbound['transport'] = {
         'type': 'http',
-        'path':
-            path.isEmpty ? '/' : path,
-        if (host.isNotEmpty)
-          'host': [host],
+        'path': q['path'] ?? '/',
+        if (q['host']?.isNotEmpty == true)
+          'host': [q['host']],
       };
     }
   }
 
-  // ==========================================================================
-  // SING-BOX CONFIG
-  // ==========================================================================
-
-  String makeConfig(
-    Server server,
+  void _applyVmessOptions(
+    Map<String, dynamic> outbound,
+    Map<String, String> d,
   ) {
-    final proxy =
-        Map<String, dynamic>.from(
-      server.outbound,
+    final security = (d['tls'] ?? '').toLowerCase();
+
+    if (security == 'tls') {
+      outbound['tls'] = {
+        'enabled': true,
+        if ((d['sni'] ?? d['host'] ?? '').isNotEmpty)
+          'server_name': d['sni'] ?? d['host'],
+        if ((d['fp'] ?? '').isNotEmpty)
+          'utls': {
+            'enabled': true,
+            'fingerprint': d['fp'],
+          },
+      };
+    }
+
+    final network = (d['net'] ?? '').toLowerCase();
+
+    if (network == 'ws') {
+      outbound['transport'] = {
+        'type': 'ws',
+        'path': d['path'] ?? '/',
+        if ((d['host'] ?? '').isNotEmpty)
+          'headers': {
+            'Host': d['host'],
+          },
+      };
+    } else if (network == 'grpc') {
+      outbound['transport'] = {
+        'type': 'grpc',
+        'service_name': d['path'] ?? '',
+      };
+    } else if (network == 'httpupgrade') {
+      outbound['transport'] = {
+        'type': 'httpupgrade',
+        'path': d['path'] ?? '/',
+        if ((d['host'] ?? '').isNotEmpty)
+          'host': d['host'],
+      };
+    }
+  }
+
+  String _nodeName(Uri uri, String fallback) {
+    final fragment = uri.fragment.trim();
+
+    return fragment.isEmpty
+        ? '$fallback • ${uri.host}'
+        : Uri.decodeComponent(fragment);
+  }
+
+  Future<void> testAll({bool silent = false}) async {
+    if (servers.isEmpty) return;
+
+    if (mounted) {
+      setState(() {
+        testing = true;
+        if (!silent) {
+          status = 'در حال تست Ping سرورها...';
+        }
+      });
+    }
+
+    await Future.wait(
+      servers.map((server) async {
+        try {
+          final stopwatch = Stopwatch()..start();
+
+          final socket = await Socket.connect(
+            server.host,
+            server.port,
+            timeout: const Duration(seconds: 5),
+          );
+
+          stopwatch.stop();
+          socket.destroy();
+
+          if (mounted) {
+            setState(() {
+              server.pingMs =
+                  stopwatch.elapsedMilliseconds;
+            });
+          }
+        } catch (_) {
+          if (mounted) {
+            setState(() {
+              server.pingMs = null;
+            });
+          }
+        }
+      }),
     );
 
-    proxy['tag'] = 'proxy';
+    final best = fastestServer();
 
-    final config =
-        <String, dynamic>{
+    if (mounted) {
+      setState(() {
+        testing = false;
+
+        if (!silent) {
+          status = best == null
+              ? 'Ping موفقی پیدا نشد'
+              : 'سریع‌ترین سرور: ${best.name}';
+        }
+      });
+    }
+  }
+
+  ServerNode? fastestServer() {
+    final valid = servers
+        .where((s) => s.pingMs != null)
+        .toList();
+
+    if (valid.isEmpty) return null;
+
+    valid.sort(
+      (a, b) =>
+          a.pingMs!.compareTo(b.pingMs!),
+    );
+
+    return valid.first;
+  }
+
+  Future<void> connectVpn() async {
+    if (connecting) return;
+
+    if (servers.isEmpty) {
+      await loadSubscription();
+      if (servers.isEmpty) return;
+    }
+
+    ServerNode? node = selectedServer;
+
+    if (selectionMode == ServerSelectionMode.auto) {
+      await testAll(silent: true);
+      node = fastestServer();
+    }
+
+    node ??= servers.first;
+
+    setState(() {
+      selectedServer = node;
+      connecting = true;
+      status = 'در حال آماده‌سازی VPN...';
+    });
+
+    try {
+      final config = buildSingboxConfig(node);
+
+      await vpn.checkConfig(
+        jsonEncode(config),
+      );
+
+      final permission =
+          await vpn.requestVPNPermission();
+
+      if (!permission) {
+        throw Exception('مجوز VPN داده نشد');
+      }
+
+      await vpn.connect(
+        SessionOptions(
+          config: jsonEncode(config),
+          networkMode: NetworkMode.vpn,
+          notification: NotificationConfig(
+            title: 'Light speed',
+            showTrafficStats: true,
+            showStopButton: true,
+            stopButtonLabel: 'قطع VPN',
+          ),
+        ),
+      );
+
+      await _syncVpnState();
+    } catch (e) {
+      debugPrint('Connect error: $e');
+
+      if (!mounted) return;
+
+      setState(() {
+        connected = false;
+        connecting = false;
+        status = 'اتصال ناموفق';
+      });
+
+      _show(
+        'اتصال VPN ناموفق بود:\n$e',
+      );
+    }
+  }
+
+  Future<void> disconnectVpn() async {
+    if (connecting && !connected) return;
+
+    try {
+      setState(() {
+        connecting = true;
+        status = 'در حال قطع VPN...';
+      });
+
+      await vpn.disconnect();
+      await _syncVpnState();
+    } catch (e) {
+      debugPrint('Disconnect error: $e');
+
+      if (mounted) {
+        setState(() {
+          connecting = false;
+          status = 'خطا در قطع VPN';
+        });
+
+        _show(
+          'خطا در قطع VPN:\n$e',
+        );
+      }
+    }
+  }
+    Map<String, dynamic> buildSingboxConfig(ServerNode node) {
+    return {
       'log': {
         'level': 'warn',
+        'timestamp': true,
       },
 
       'dns': {
         'servers': [
           {
-            'type': 'https',
             'tag': 'dns-remote',
-            'server': '1.1.1.1',
-            'server_port': 443,
-            'path': '/dns-query',
-            'tls': {
-              'enabled': true,
-              'server_name':
-                  'cloudflare-dns.com',
-            },
+            'address': 'https://1.1.1.1/dns-query',
+            'detour': 'proxy',
           },
           {
-            'type': 'local',
-            'tag': 'dns-local',
+            'tag': 'dns-direct',
+            'address': 'local',
           },
         ],
         'final': 'dns-remote',
-        'strategy': 'ipv4_only',
       },
 
       'inbounds': [
         {
           'type': 'tun',
           'tag': 'tun-in',
+
           'address': [
             '172.19.0.1/30',
+            'fdfe:dcba:9876::1/126',
           ],
-          'mtu': 1400,
+
           'auto_route': true,
-          'stack': 'system',
+
+          // mixed is better for normal TCP + UDP apps
+          // such as Telegram and other mobile applications.
+          'stack': 'mixed',
+
+          'mtu': 1400,
+
+          'dns_mode': 'hijack',
+
+          'endpoint_independent_nat': true,
+
+          'sniff': true,
+          'sniff_override_destination': false,
+
+          'domain_strategy': 'prefer_ipv4',
         },
       ],
 
       'outbounds': [
-        proxy,
+        node.outbound,
+
         {
           'type': 'direct',
           'tag': 'direct',
         },
+
         {
           'type': 'block',
           'tag': 'block',
@@ -2278,907 +1154,280 @@ class _HomePageState extends State<HomePage>
       ],
 
       'route': {
+        // Keep the upstream connection outside
+        // the Android VPN/TUN loop when supported.
+        'auto_detect_interface': true,
+        'override_android_vpn': true,
+
         'rules': [
+          {
+            'action': 'sniff',
+          },
+
           {
             'protocol': 'dns',
             'action': 'hijack-dns',
           },
-          {
-            'port': 53,
-            'action': 'hijack-dns',
-          },
+
           {
             'ip_is_private': true,
             'outbound': 'direct',
           },
         ],
+
+        // Everything else goes through the selected
+        // VLESS / VMess / Trojan / Hysteria2 / TUIC / SS server.
         'final': 'proxy',
       },
     };
-
-    return jsonEncode(config);
   }
 
-  // ==========================================================================
-  // SERVER TEST
-  // ==========================================================================
+  Future<void> _saveSelected() async {
+    final prefs =
+        await SharedPreferences.getInstance();
 
-  Future<void> testAll({
-    bool silent = false,
-  }) async {
-    if (servers.isEmpty ||
-        testing) {
-      return;
+    if (selectedServer == null) {
+      await prefs.remove('selected_server_raw');
+    } else {
+      await prefs.setString(
+        'selected_server_raw',
+        selectedServer!.raw,
+      );
     }
+  }
 
-    if (mounted) {
-      setState(() {
-        testing = true;
-
-        if (!silent) {
-          stateText =
-              'در حال تست سرورها...';
-        }
-      });
-    }
-
-    await Future.wait(
-      servers.map(
-        (server) async {
-          final stopwatch =
-              Stopwatch()..start();
-
-          try {
-            final socket =
-                await Socket.connect(
-              server.host,
-              server.port,
-              timeout:
-                  const Duration(
-                seconds: 4,
-              ),
-            );
-
-            stopwatch.stop();
-
-            socket.destroy();
-
-            server.ping =
-                stopwatch
-                    .elapsedMilliseconds;
-          } catch (_) {
-            server.ping = null;
-          }
-        },
-      ),
+  Future<void> addSubscription() async {
+    final controller = TextEditingController(
+      text: urlController.text,
     );
 
-    if (mounted) {
-      setState(() {
-        testing = false;
-
-        if (!silent) {
-          stateText =
-              'تست سرورها تمام شد';
-        }
-      });
-    }
-  }
-
-  Server? fastest() {
-    final good = servers
-        .where(
-          (s) => s.ping != null,
-        )
-        .toList();
-    if (good.isEmpty) {
-      return null;
-    }
-
-    good.sort(
-      (a, b) =>
-          a.ping!.compareTo(
-        b.ping!,
-      ),
-    );
-
-    return good.first;
-  }
-
-  // ==========================================================================
-  // MANUAL SERVER
-  // ==========================================================================
-
-  Future<void> selectManualServer(
-    Server server,
-  ) async {
-    if (connected ||
-        connecting) {
-      snack(
-        'ابتدا VPN را قطع کن',
-      );
-      return;
-    }
-
-    setState(() {
-      selectionMode =
-          ServerSelectionMode.manual;
-
-      selectedServer = server;
-
-      stateText =
-          'سرور انتخاب شد: ${server.name}';
-    });
-
-    await saveSelectionMode();
-    await saveSelectedServer();
-    snack(
-      'سرور ${server.name} انتخاب شد',
-    );
-  }
-
-  Future<void> selectAutoMode() async {
-    if (connected ||
-        connecting) {
-      snack(
-        'ابتدا VPN را قطع کن',
-      );
-      return;
-    }
-
-    setState(() {
-      selectionMode =
-          ServerSelectionMode.auto;
-
-      stateText =
-          'در حال پیدا کردن سریع‌ترین سرور...';
-    });
-
-    await saveSelectionMode();
-
-    if (servers.isEmpty) {
-      snack(
-        'ابتدا Subscription را اضافه کن',
-      );
-      return;
-    }
-
-    await testAll(
-      silent: true,
-    );
-
-    final best = fastest();
-
-    if (mounted) {
-      setState(() {
-        selectedServer = best;
-
-        stateText = best == null
-            ? 'سرور قابل دسترس پیدا نشد'
-            : 'سریع‌ترین سرور: ${best.name}';
-      });
-    }
-
-    await saveSelectedServer();
-
-    if (best != null) {
-      snack(
-        'سریع‌ترین سرور: '
-        '${best.name} • ${best.ping} ms',
-      );
-    }
-  }
-
-  // ==========================================================================
-  // CONNECT
-  // ==========================================================================
-
-  Future<void> connect() async {
-    if (servers.isEmpty) {
-      snack(
-        'ابتدا Subscription را اضافه کن',
-      );
-      return;
-    }
-
-    if (connected ||
-        connecting) {
-      return;
-    }
-
-    setState(() {
-      connecting = true;
-      stateText =
-          'در حال آماده‌سازی VPN...';
-    });
-
-    try {
-      Server? selected;
-
-      if (selectionMode ==
-              ServerSelectionMode.manual &&
-          selectedServer != null) {
-        selected = selectedServer;
-      } else {
-        setState(() {
-          stateText =
-              'در حال تست سریع‌ترین سرور...';
-        });
-
-        await testAll(
-          silent: true,
-        );
-
-        selected = fastest();
-
-        selected ??= servers.first;
-
-        if (mounted) {
-          setState(() {
-            selectedServer =
-                selected;
-          });
-        }
-
-        await saveSelectedServer();
-      }
-
-      if (selected == null) {
-        throw Exception(
-          'سروری برای اتصال وجود ندارد',
-        );
-      }
-
-      if (mounted) {
-        setState(() {
-          stateText =
-              'سرور: ${selected!.name}';
-        });
-      }
-
-      final permission =
-          await vpn.requestVPNPermission();
-
-      if (!permission) {
-        throw Exception(
-          'مجوز VPN داده نشد',
-        );
-      }
-
-      final config =
-          makeConfig(selected);
-
-      if (mounted) {
-        setState(() {
-          stateText =
-              'در حال بررسی کانفیگ...';
-        });
-      }
-
-      await vpn.checkConfig(
-        config,
-      );
-      if (mounted) {
-        setState(() {
-          stateText =
-              'در حال اتصال به سرور...';
-        });
-      }
-
-      await vpn.connect(
-        SessionOptions(
-          config: config,
-          networkMode:
-              NetworkMode.vpn,
-          notification:
-              NotificationConfig(
-            title: 'Light speed',
-            showTrafficStats: true,
-            showStopButton: true,
-            stopButtonLabel:
-                'قطع اتصال',
-          ),
-        ),
-      );
-
-      if (!mounted) return;
-
-      setState(() {
-        connecting = false;
-        connected = true;
-        stateText =
-            'متصل • ${selected!.name}';
-      });
-
-      snack(
-        'VPN با موفقیت متصل شد',
-      );
-    } catch (e, stack) {
-      debugPrint(
-        'CONNECT ERROR: $e',
-      );
-
-      debugPrint(
-        'CONNECT STACK:\n$stack',
-      );
-
-      try {
-        await vpn.disconnect();
-      } catch (_) {}
-
-      if (!mounted) return;
-
-      setState(() {
-        connected = false;
-        connecting = false;
-        stateText =
-            'اتصال ناموفق';
-      });
-
-      snack(
-        'خطای VPN:\n$e',
-      );
-    }
-  }
-  // ==========================================================================
-  // DISCONNECT
-  // ==========================================================================
-
-  Future<void> disconnect() async {
-    if (connecting) {
-      return;
-    }
-
-    try {
-      await vpn.disconnect();
-    } catch (e) {
-      debugPrint(
-        'Disconnect error: $e',
-      );
-    }
-
-    if (!mounted) return;
-
-    setState(() {
-      connected = false;
-      connecting = false;
-
-      stateText =
-          'اتصال قطع شد';
-
-      download = '0 Mbps';
-      upload = '0 Mbps';
-
-      downloadTotalBytes = 0;
-      uploadTotalBytes = 0;
-    });
-  }
-
-  // ==========================================================================
-  // NETWORK SPEED TEST
-  // ==========================================================================
-
-  Future<void> startSpeedTest() async {
-    if (networkTestRunning) {
-      return;
-    }
-
-    try {
-      setState(() {
-        networkTestRunning = true;
-
-        testDownload =
-            'در حال تست...';
-
-        testUpload =
-            'در حال تست...';
-
-        testPing =
-            'در حال تست...';
-      });
-
-      await vpn.startNetworkQualityTest();
-    } catch (e) {
-      debugPrint(
-        'Speed test error: $e',
-      );
-      if (!mounted) return;
-
-      setState(() {
-        networkTestRunning = false;
-      });
-
-      snack(
-        'تست سرعت ناموفق بود:\n$e',
-      );
-    }
-  }
-
-  Future<void> stopSpeedTest() async {
-    try {
-      await vpn.stopNetworkQualityTest();
-    } catch (e) {
-      debugPrint(
-        'Stop speed test: $e',
-      );
-    }
-    if (!mounted) return;
-
-    setState(() {
-      networkTestRunning = false;
-    });
-  }
-
-  // ==========================================================================
-  // STUN TEST
-  // ==========================================================================
-
-  Future<void> startStunTest() async {
-    if (stunTestRunning) {
-      return;
-    }
-
-    try {
-      setState(() {
-        stunTestRunning = true;
-        stunLatency =
-            'در حال تست...';
-        externalIp =
-            'در حال تست...';
-        natType =
-            'در حال تست...';
-      });
-
-      await vpn.startStunTest();
-    } catch (e) {
-      debugPrint(
-        'STUN test error: $e',
-      );
-
-      if (!mounted) return;
-
-      setState(() {
-        stunTestRunning = false;
-      });
-
-      snack(
-        'تست STUN ناموفق بود:\n$e',
-      );
-    }
-  }
-
-  Future<void> stopStunTest() async {
-    try {
-      await vpn.stopStunTest();
-    } catch (e) {
-      debugPrint(
-        'Stop STUN: $e',
-      );
-    }
-
-    if (!mounted) return;
-
-    setState(() {
-      stunTestRunning = false;
-    });
-  }
-
-  // ==========================================================================
-  // HELPERS
-  // ==========================================================================
-
-  int _toInt(
-    dynamic value,
-  ) {
-    if (value is int) return value;
-
-    if (value is num) {
-      return value.toInt();
-    }
-
-    return int.tryParse(
-          '$value',
-        ) ??
-        0;
-  }
-
-  String _uriName(
-    Uri uri,
-    String fallback,
-  ) {
-    if (uri.fragment.isNotEmpty) {
-      try {
-        return Uri.decodeComponent(
-          uri.fragment,
-        );
-      } catch (_) {
-        return uri.fragment;
-      }
-    }
-
-    return '$fallback ${uri.host}';
-  }
-
-  String _serverFingerprint(
-    Server server,
-  ) {
-    final outbound =
-        Map<String, dynamic>.from(
-      server.outbound,
-    );
-    outbound.remove('tag');
-
-    return jsonEncode(
-      outbound,
-    );
-  }
-
-  String speed(
-    dynamic bps,
-  ) {
-    final value =
-        bps is num
-            ? bps.toDouble()
-            : 0.0;
-
-    if (value <= 0) {
-      return '0 Mbps';
-    }
-
-    if (value >= 1000000000) {
-      return
-          '${(value / 1000000000).toStringAsFixed(2)} Gbps';
-    }
-
-    if (value >= 1000000) {
-      return
-          '${(value / 1000000).toStringAsFixed(2)} Mbps';
-    }
-
-    if (value >= 1000) {
-      return
-          '${(value / 1000).toStringAsFixed(1)} Kbps';
-    }
-
-    return
-        '${value.toStringAsFixed(0)} bps';
-  }
-
-  String size(
-    int? bytes,
-  ) {
-    if (bytes == null) {
-      return 'نامشخص';
-    }
-
-    if (bytes == 0) {
-      return '0 B';
-    }
-
-    if (bytes < 1024 * 1024) {
-      return
-          '${(bytes / 1024).toStringAsFixed(1)} KB';
-    }
-
-    if (bytes <
-        1024 *
-            1024 *
-            1024) {
-      return
-          '${(bytes / 1024 / 1024).toStringAsFixed(1)} MB';
-    }
-
-    return
-        '${(bytes / 1024 / 1024 / 1024).toStringAsFixed(2)} GB';
-  }
-
-  String _dateFromUnix(
-    int timestamp,
-  ) {
-    try {
-      final milliseconds =
-          timestamp > 20000000000
-              ? timestamp
-              : timestamp * 1000;
-
-      final date =
-          DateTime
-              .fromMillisecondsSinceEpoch(
-        milliseconds,
-      );
-
-      return
-          '${date.year}/'
-          '${date.month.toString().padLeft(2, '0')}/'
-          '${date.day.toString().padLeft(2, '0')}';
-    } catch (_) {
-      return 'نامشخص';
-    }
-  }
-
-  String _prettyState(
-    String value,
-  ) {
-    final low =
-        value.toLowerCase();
-
-    if (low.contains('started') ||
-        low.contains('running') ||
-        low.contains('connected')) {
-      return 'VPN متصل است';
-    }
-
-    if (low.contains('starting')) {
-      return 'در حال اتصال...';
-    }
-
-    if (low.contains('stopping')) {
-      return 'در حال قطع اتصال...';
-    }
-
-    if (low.contains('stopped') ||
-        low.contains('disconnected')) {
-      return 'VPN متوقف است';
-    }
-
-    return value;
-  }
-
-  void snack(
-    String text,
-  ) {
-    if (!mounted) return;
-
-    ScaffoldMessenger.of(
-      context,
-    ).hideCurrentSnackBar();
-
-    ScaffoldMessenger.of(
-      context,
-    ).showSnackBar(
-      SnackBar(
-        content: Text(text),
-        duration:
-            const Duration(
-          seconds: 4,
-        ),
-        behavior:
-            SnackBarBehavior.floating,
-        shape:
-            RoundedRectangleBorder(
-          borderRadius:
-              BorderRadius.circular(
-            16,
-          ),
-        ),
-      ),
-    );
-  }
-
-  LinearGradient get mainGradient {
-    return const LinearGradient(
-      begin: Alignment.topLeft,
-      end: Alignment.bottomRight,
-      colors: [
-        Color(0xFF00E5FF),
-        Color(0xFF7C4DFF),
-      ],
-    );
-  }
-
-  Widget card(
-    Widget child, {
-    EdgeInsetsGeometry? padding,
-  }) {
-    return Container(
-      margin:
-          const EdgeInsets.only(
-        bottom: 12,
-      ),
-      padding:
-          padding ??
-              const EdgeInsets.all(
-            16,
-          ),
-      decoration:
-          BoxDecoration(
-        color:
-            const Color(0xFF0D121D),
-        borderRadius:
-            BorderRadius.circular(
-          22,
-        ),
-        border:
-            Border.all(
-          color:
-              Colors.white.withValues(
-            alpha: .06,
-          ),
-        ),
-        boxShadow: [
-          BoxShadow(
-            color:
-                Colors.black.withValues(
-              alpha: .18,
+    final value = await showDialog<String>(
+      context: context,
+      builder: (context) {
+        return Directionality(
+          textDirection: TextDirection.rtl,
+          child: AlertDialog(
+            title: const Text(
+              'افزودن Subscription',
             ),
-            blurRadius: 18,
-            offset:
-                const Offset(0, 8),
-          ),
-        ],
-      ),
-      child: child,
-    );
-  }
+            content: TextField(
+              controller: controller,
+              autofocus: true,
+              textDirection: TextDirection.ltr,
+              keyboardType: TextInputType.url,
+              decoration: const InputDecoration(
+                hintText:
+                    'https://example.com/sub...',
+                border: OutlineInputBorder(),
+              ),
+            ),
+            actions: [
+              TextButton(
+                onPressed: () =>
+                    Navigator.pop(context),
+                child: const Text('لغو'),
+              ),
 
-  Widget header(
-    String title,
-    String subtitle,
-  ) {
-    return Padding(
-      padding:
-          const EdgeInsets.only(
-        bottom: 18,
-      ),
-      child: Row(
-        children: [
-          Container(
-            width: 48,
-            height: 48,
-            decoration:
-                BoxDecoration(
-              shape:
-                  BoxShape.circle,
-              gradient:
-                  mainGradient,
-              boxShadow: [
-                BoxShadow(
-                  color:
-                      const Color(
-                    0xFF7C4DFF,
-                  ).withValues(
-                    alpha: .3,
-                  ),
-                  blurRadius: 18,
+              FilledButton(
+                onPressed: () =>
+                    Navigator.pop(
+                  context,
+                  controller.text.trim(),
                 ),
-              ],
-            ),
-            child:
-                const Icon(
-              Icons.bolt,
-              color:
-                  Colors.white,
-              size: 27,
-            ),
-          ),
-          const SizedBox(
-            width: 12,
-          ),
-          Column(
-            crossAxisAlignment:
-                CrossAxisAlignment.start,
-            children: [
-              Text(
-                title,
-                style:
-                    const TextStyle(
-                  fontSize: 23,
-                  fontWeight:
-                      FontWeight.w900,
-                ),
-              ),
-              const SizedBox(
-                height: 2,
-              ),
-              Text(
-                subtitle,
-                style:
-                    const TextStyle(
-                  color:
-                      Colors.white54,
-                  fontSize: 13,
-                ),
+                child: const Text('ذخیره'),
               ),
             ],
           ),
-        ],
-      ),
+        );
+      },
     );
+
+    controller.dispose();
+
+    if (value == null || value.isEmpty) {
+      return;
+    }
+
+    urlController.text = value;
+
+    await loadSubscription();
   }
 
-  // ==========================================================================
-  // BUILD
-  // ==========================================================================
+  void _show(String message) {
+    if (!mounted) return;
+
+    ScaffoldMessenger.of(context)
+      ..hideCurrentSnackBar()
+      ..showSnackBar(
+        SnackBar(
+          content: Text(message),
+        ),
+      );
+  }
 
   @override
-  Widget build(
-    BuildContext context,
-  ) {
-    final pages = [
-      _home(),
-      _servers(),
-      _traffic(),
-      _subscription(),
-      _settings(),
-    ];
+  Widget build(BuildContext context) {
+    final used = subscription.used;
+    final total = subscription.total;
 
     return Directionality(
-      textDirection:
-          TextDirection.rtl,
+      textDirection: TextDirection.rtl,
       child: Scaffold(
-        body: SafeArea(
-          child: pages[page],
+        appBar: AppBar(
+          title: const Text(
+            'Light speed 🔥',
+            style: TextStyle(
+              fontWeight: FontWeight.w800,
+            ),
+          ),
+
+          actions: [
+            IconButton(
+              tooltip: 'بروزرسانی',
+              onPressed:
+                  loading ? null : loadSubscription,
+              icon: const Icon(
+                Icons.refresh_rounded,
+              ),
+            ),
+          ],
         ),
-        bottomNavigationBar:
-            NavigationBar(
-          height: 72,
-          selectedIndex: page,
-          backgroundColor:
-              const Color(0xFF090D15),
-          indicatorColor:
-              const Color(0xFF34216B),
-          onDestinationSelected:
-              (index) {
-            setState(() {
-              page = index;
-            });
-          },
-          destinations:
-              const [
-            NavigationDestination(
-              icon:
-                  Icon(
-                Icons.home_outlined,
+
+        body: RefreshIndicator(
+          onRefresh: () => loadSubscription(),
+
+          child: ListView(
+            padding: const EdgeInsets.all(16),
+
+            children: [
+              _connectionCard(),
+
+              const SizedBox(height: 14),
+
+              _trafficCard(),
+
+              const SizedBox(height: 14),
+
+              _subscriptionCard(
+                used,
+                total,
               ),
-              selectedIcon:
-                  Icon(
-                Icons.home,
+
+              const SizedBox(height: 14),
+
+              _serverCard(),
+
+              const SizedBox(height: 14),
+
+              _subscriptionButton(),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _connectionCard() {
+    final color = connected
+        ? Colors.greenAccent
+        : const Color(0xFF7C4DFF);
+
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(20),
+
+        child: Column(
+          children: [
+            Container(
+              width: 92,
+              height: 92,
+
+              decoration: BoxDecoration(
+                shape: BoxShape.circle,
+
+                border: Border.all(
+                  color: color,
+                  width: 3,
+                ),
+
+                boxShadow: [
+                  BoxShadow(
+                    color:
+                        color.withValues(alpha: .18),
+                    blurRadius: 28,
+                    spreadRadius: 2,
+                  ),
+                ],
               ),
-              label: 'خانه',
+
+              child: Icon(
+                connected
+                    ? Icons.shield_rounded
+                    : Icons
+                        .power_settings_new_rounded,
+
+                size: 42,
+                color: color,
+              ),
             ),
-            NavigationDestination(
-              icon:
-                  Icon(
-                Icons.dns_outlined,
+
+            const SizedBox(height: 16),
+
+            Text(
+              connected ? 'متصل' : 'قطع',
+
+              style: const TextStyle(
+                fontSize: 25,
+                fontWeight: FontWeight.w900,
               ),
-              selectedIcon:
-                  Icon(
-                Icons.dns,
-              ),
-              label: 'سرورها',
             ),
-            NavigationDestination(
-              icon:
-                  Icon(
-                Icons.bar_chart_outlined,
+
+            const SizedBox(height: 6),
+
+            Text(
+              status,
+
+              style: TextStyle(
+                color: Colors.white.withValues(
+                  alpha: .65,
+                ),
               ),
-              selectedIcon:
-                  Icon(
-                Icons.bar_chart,
-              ),
-              label: 'ترافیک',
+
+              textAlign: TextAlign.center,
             ),
-            NavigationDestination(
-              icon:
-                  Icon(
-                Icons.link_outlined,
+
+            const SizedBox(height: 18),
+
+            SizedBox(
+              width: double.infinity,
+              height: 54,
+
+              child: FilledButton.icon(
+                onPressed: connecting
+                    ? null
+                    : connected
+                        ? disconnectVpn
+                        : connectVpn,
+
+                icon: Icon(
+                  connected
+                      ? Icons.stop_circle_outlined
+                      : Icons.bolt_rounded,
+                ),
+
+                label: Text(
+                  connecting
+                      ? 'لطفاً صبر کن...'
+                      : connected
+                          ? 'قطع VPN'
+                          : 'اتصال سریع',
+
+                  style: const TextStyle(
+                    fontSize: 17,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
               ),
-              selectedIcon:
-                  Icon(
-                Icons.link,
-              ),
-              label: 'اشتراک',
-            ),
-            NavigationDestination(
-              icon:
-                  Icon(
-                Icons.settings_outlined,
-              ),
-              selectedIcon:
-                  Icon(
-                Icons.settings,
-              ),
-              label: 'تنظیمات',
             ),
           ],
         ),
@@ -3186,1343 +1435,210 @@ class _HomePageState extends State<HomePage>
     );
   }
 
-  // ==========================================================================
-  // HOME
-  // ==========================================================================
+  Widget _trafficCard() {
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(18),
 
-  Widget _home() {
-    final best = fastest();
-
-    final displayServer =
-        selectionMode ==
-                ServerSelectionMode.manual
-            ? selectedServer
-            : selectedServer ?? best;
-
-    final percent =
-        totalBytes == null ||
-                totalBytes! <= 0
-            ? 0.0
-            : ((usedBytes ?? 0) /
-                    totalBytes!)
-                .clamp(
-                0.0,
-                1.0,
-              );
-
-    return ListView(
-      padding:
-          const EdgeInsets.fromLTRB(
-        18,
-        18,
-        18,
-        24,
-      ),
-      children: [
-        header(
-          'Light speed',
-          'VPN واقعی با sing-box',
-        ),
-
-        const SizedBox(
-          height: 4,
-        ),
-
-        _connectionHero(),
-
-        const SizedBox(
-          height: 18,
-        ),
-
-        Center(
-          child: Text(
-            stateText,
-            textAlign:
-                TextAlign.center,
-            style: TextStyle(
-              color: connected
-                  ? const Color(
-                      0xFF00E676,
-                    )
-                  : Colors.white70,
-              fontWeight:
-                  FontWeight.w600,
-            ),
-          ),
-        ),
-
-        const SizedBox(
-          height: 18,
-        ),
-
-        _modeSelector(),
-
-        const SizedBox(
-          height: 10,
-        ),
-
-        _selectedServerCard(
-          displayServer,
-        ),
-
-        const SizedBox(
-          height: 4,
-        ),
-
-        Row(
+        child: Row(
           children: [
             Expanded(
-              child:
-                  _statCard(
-                icon:
-                    Icons.download_rounded,
-                title:
-                    'دانلود',
-                value:
-                    download,
-                iconColor:
-                    const Color(
-                  0xFF00E5FF,
-                ),
+              child: _metric(
+                Icons.arrow_downward_rounded,
+                'دانلود',
+                downloadSpeed,
               ),
             ),
-            const SizedBox(
-              width: 10,
+
+            Container(
+              width: 1,
+              height: 60,
+
+              color: Colors.white.withValues(
+                alpha: .08,
+              ),
             ),
+
             Expanded(
-              child:
-                  _statCard(
-                icon:
-                    Icons.upload_rounded,
-                title:
-                    'آپلود',
-                value:
-                    upload,
-                iconColor:
-                    const Color(
-                  0xFF9C6CFF,
-                ),
+              child: _metric(
+                Icons.arrow_upward_rounded,
+                'آپلود',
+                uploadSpeed,
               ),
             ),
           ],
         ),
+      ),
+    );
+  }
 
-        card(
-          Column(
-            children: [
-              Row(
-                children: [
-                  Container(
-                    width: 42,
-                    height: 42,
-                    decoration:
-                        BoxDecoration(
-                      borderRadius:
-                          BorderRadius.circular(
-                        14,
-                      ),
-                      color:
-                          const Color(
-                        0xFF7C4DFF,
-                      ).withValues(
-                        alpha: .12,
-                      ),
-                    ),
-                    child:
-                        const Icon(
-                      Icons.data_usage,
-                      color:
-                          Color(
-                        0xFF9C6CFF,
-                      ),
-                    ),
-                  ),
-                  const SizedBox(
-                    width: 12,
-                  ),
-                  const Expanded(
-                    child:
-                        Column(
-                      crossAxisAlignment:
-                          CrossAxisAlignment
-                              .start,
-                      children: [
-                        Text(
-                          'حجم اشتراک',
-                          style:
-                              TextStyle(
-                            fontWeight:
-                                FontWeight
-                                    .bold,
-                          ),
-                        ),
-                        SizedBox(
-                          height: 3,
-                        ),
-                        Text(
-                          'مصرف اینترنت',
-                          style:
-                              TextStyle(
-                            color:
-                                Colors.white54,
-                            fontSize: 12,
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                  Text(
-                    size(
-                      totalBytes,
-                    ),
-                    style:
-                        const TextStyle(
-                      fontWeight:
-                          FontWeight.bold,
-                    ),
-                  ),
-                ],
-              ),
-              const SizedBox(
-                height: 14,
-              ),
-              ClipRRect(
-                borderRadius:
-                    BorderRadius.circular(
-                  20,
-                ),
-                child:
-                    LinearProgressIndicator(
-                  value: percent,
-                  minHeight: 8,
-                  backgroundColor:
-                      Colors.white
-                          .withValues(
-                    alpha: .06,
-                  ),
-                ),
-              ),
-              const SizedBox(
-                height: 10,
-              ),
-              Row(
-                children: [
-                  const Text(
-                    'مصرف شده',
-                    style:
-                        TextStyle(
-                      color:
-                          Colors.white54,
-                      fontSize: 12,
-                    ),
-                  ),
-                  const Spacer(),
-                  Text(
-                    size(
-                      usedBytes,
-                    ),
-                    style:
-                        const TextStyle(
-                      fontSize: 12,
-                    ),
-                  ),
-                ],
-              ),
-            ],
+  Widget _metric(
+    IconData icon,
+    String title,
+    String value,
+  ) {
+    return Column(
+      children: [
+        Icon(
+          icon,
+          color: const Color(0xFF00D4FF),
+        ),
+
+        const SizedBox(height: 6),
+
+        Text(
+          title,
+
+          style: TextStyle(
+            color: Colors.white.withValues(
+              alpha: .6,
+            ),
+          ),
+        ),
+
+        const SizedBox(height: 3),
+
+        Text(
+          value,
+
+          style: const TextStyle(
+            fontWeight: FontWeight.w800,
+            fontSize: 17,
           ),
         ),
       ],
     );
   }
 
-  // ==========================================================================
-  // CONNECTION HERO
-  // ==========================================================================
-
-  Widget _connectionHero() {
-    return Center(
-      child: GestureDetector(
-        onTap:
-            connecting
-                ? null
-                : connected
-                    ? disconnect
-                    : connect,
-        child: Container(
-          width: 225,
-          height: 225,
-          decoration:
-              BoxDecoration(
-            shape:
-                BoxShape.circle,
-            gradient:
-                connected
-                    ? const LinearGradient(
-                        colors: [
-                          Color(
-                            0xFF00E676,
-                          ),
-                          Color(
-                            0xFF00B8D4,
-                          ),
-                        ],
-                      )
-                    : mainGradient,
-            boxShadow: [
-              BoxShadow(
-                color:
-                    (connected
-                            ? const Color(
-                                0xFF00E676,
-                              )
-                            : const Color(
-                                0xFF7C4DFF,
-                              ))
-                        .withValues(
-                  alpha: .30,
-                ),
-                blurRadius: 45,
-                spreadRadius: 8,
-              ),
-            ],
-          ),
-          child: Center(
-            child: Container(
-              width: 199,
-              height: 199,
-              decoration:
-                  const BoxDecoration(
-                shape:
-                    BoxShape.circle,
-                color:
-                    Color(0xFF080C14),
-              ),
-              child: Center(
-                child:
-                    connecting
-                        ? Column(
-                            mainAxisAlignment:
-                                MainAxisAlignment
-                                    .center,
-                            children: [
-                              const SizedBox(
-                                width: 42,
-                                height: 42,
-                                child:
-                                    CircularProgressIndicator(
-                                  strokeWidth:
-                                      3,
-                                ),
-                              ),
-                              const SizedBox(
-                                height: 14,
-                              ),
-                              const Text(
-                                'در حال اتصال',
-                                style:
-                                    TextStyle(
-                                  fontWeight:
-                                      FontWeight
-                                          .bold,
-                                ),
-                              ),
-                            ],
-                          )
-                        : Column(
-                            mainAxisAlignment:
-                                MainAxisAlignment
-                                    .center,
-                            children: [
-                              Icon(
-                                Icons
-                                    .power_settings_new,
-                                size: 58,
-                                color:
-                                    connected
-                                        ? const Color(
-                                            0xFF00E676,
-                                          )
-                                        : const Color(
-                                            0xFF9C6CFF,
-                                          ),
-                              ),
-                              const SizedBox(
-                                height: 10,
-                              ),
-                              Text(
-                                connected
-                                    ? 'قطع اتصال'
-                                    : 'اتصال',
-                                style:
-                                    const TextStyle(
-                                  fontSize:
-                                      18,
-                                  fontWeight:
-                                      FontWeight
-                                          .w800,
-                                ),
-                              ),
-                              const SizedBox(
-                                height: 4,
-                              ),
-                              Text(
-                                connected
-                                    ? 'VPN فعال است'
-                                    : 'برای اتصال لمس کنید',
-                                style:
-                                    const TextStyle(
-                                  color:
-                                      Colors.white54,
-                                  fontSize:
-                                      11,
-                                ),
-                              ),
-                            ],
-                          ),
-              ),
-            ),
-          ),
-        ),
-      ),
-    );
-  }
-
-  // ==========================================================================
-  // MODE SELECTOR
-  // ==========================================================================
-
-  Widget _modeSelector() {
-    return card(
-      Row(
-        children: [
-          Expanded(
-            child:
-                _modeButton(
-              icon:
-                  Icons.auto_awesome,
-              title:
-                  'خودکار',
-              subtitle:
-                  'سریع‌ترین سرور',
-              active:
-                  selectionMode ==
-                      ServerSelectionMode
-                          .auto,
-              onTap:
-                  selectAutoMode,
-            ),
-          ),
-          const SizedBox(
-            width: 10,
-          ),
-          Expanded(
-            child:
-                _modeButton(
-              icon:
-                  Icons.touch_app,
-              title:
-                  'دستی',
-              subtitle:
-                  'انتخاب سرور',
-              active:
-                  selectionMode ==
-                      ServerSelectionMode
-                          .manual,
-              onTap: () {
-                setState(() {
-                  page = 1;
-                });
-              },
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _modeButton({
-    required IconData icon,
-    required String title,
-    required String subtitle,
-    required bool active,
-    required VoidCallback onTap,
-  }) {
-    return InkWell(
-      onTap: onTap,
-      borderRadius:
-          BorderRadius.circular(
-        18,
-      ),
-      child:
-          AnimatedContainer(
-        duration:
-            const Duration(
-          milliseconds: 200,
-        ),
-        padding:
-            const EdgeInsets.all(
-          13,
-        ),
-        decoration:
-            BoxDecoration(
-          borderRadius:
-              BorderRadius.circular(
-            18,
-          ),
-          gradient:
-              active
-                  ? mainGradient
-                  : null,
-          color:
-              active
-                  ? null
-                  : const Color(
-                      0xFF151B28,
-                    ),
-        ),
-        child: Row(
-          children: [
-            Icon(
-              icon,
-              color:
-                  active
-                      ? Colors.white
-                      : Colors.white60,
-            ),
-            const SizedBox(
-              width: 8,
-            ),
-            Expanded(
-              child:
-                  Column(
-                crossAxisAlignment:
-                    CrossAxisAlignment
-                        .start,
-                children: [
-                  Text(
-                    title,
-                    style:
-                        const TextStyle(
-                      fontWeight:
-                          FontWeight.bold,
-                    ),
-                  ),
-                  Text(
-                    subtitle,
-                    style:
-                        TextStyle(
-                      color:
-                          active
-                              ? Colors.white70
-                              : Colors.white38,
-                      fontSize: 10,
-                    ),
-                  ),
-                ],
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  // ==========================================================================
-  // SELECTED SERVER
-  // ==========================================================================
-
-  Widget _selectedServerCard(
-    Server? server,
+  Widget _subscriptionCard(
+    int? used,
+    int? total,
   ) {
-    return card(
-      InkWell(
-        onTap: () {
-          setState(() {
-            page = 1;
-          });
-        },
-        borderRadius:
-            BorderRadius.circular(
-          18,
-        ),
-        child: Row(
-          children: [
-            Container(
-              width: 48,
-              height: 48,
-              decoration:
-                  BoxDecoration(
-                borderRadius:
-                    BorderRadius.circular(
-                  15,
-                ),
-                gradient:
-                    mainGradient,
-              ),
-              child:
-                  const Icon(
-                Icons.public,
-                color:
-                    Colors.white,
-              ),
-            ),
-            const SizedBox(
-              width: 12,
-            ),
-            Expanded(
-              child:
-                  Column(
-                crossAxisAlignment:
-                    CrossAxisAlignment
-                        .start,
-                children: [
-                  Text(
-                    selectionMode ==
-                            ServerSelectionMode
-                                .auto
-                        ? 'سرور سریع‌ترین'
-                        : 'سرور انتخاب‌شده',
-                    style:
-                        const TextStyle(
-                      color:
-                          Colors.white54,
-                      fontSize: 11,
-                    ),
-                  ),
-                  const SizedBox(
-                    height: 4,
-                  ),
-                  Text(
-                    server?.name ??
-                        'هنوز سروری انتخاب نشده',
-                    maxLines: 1,
-                    overflow:
-                        TextOverflow
-                            .ellipsis,
-                    style:
-                        const TextStyle(
-                      fontWeight:
-                          FontWeight.bold,
-                    ),
-                  ),
-                  if (server != null)
-                    Text(
-                      '${server.type} • ${server.host}',
-                      maxLines: 1,
-                      overflow:
-                          TextOverflow
-                              .ellipsis,
-                      style:
-                          const TextStyle(
-                        color:
-                            Colors.white38,
-                        fontSize: 10,
-                      ),
-                    ),
-                ],
-              ),
-            ),
-            if (server?.ping != null)
-              Column(
-                children: [
-                  Text(
-                    '${server!.ping}',
-                    style:
-                        const TextStyle(
-                      fontWeight:
-                          FontWeight.bold,
-                    ),
-                  ),
-                  const Text(
-                    'ms',
-                    style:
-                        TextStyle(
-                      color:
-                          Colors.white38,
-                      fontSize: 10,
-                    ),
-                  ),
-                ],
+    final ratio =
+        used != null &&
+                total != null &&
+                total > 0
+            ? (used / total).clamp(
+                0.0,
+                1.0,
               )
-            else
-              const Icon(
-                Icons.chevron_left,
-                color:
-                    Colors.white38,
-              ),
-          ],
-        ),
-      ),
-    );
-  }
-  // ==========================================================================
-  // STAT CARD
-  // ==========================================================================
+            : 0.0;
 
-  Widget _statCard({
-    required IconData icon,
-    required String title,
-    required String value,
-    required Color iconColor,
-  }) {
-    return card(
-      Column(
-        crossAxisAlignment:
-            CrossAxisAlignment.start,
-        children: [
-          Row(
-            children: [
-              Icon(
-                icon,
-                color: iconColor,
-                size: 20,
-              ),
-              const SizedBox(
-                width: 6,
-              ),
-              Text(
-                title,
-                style:
-                    const TextStyle(
-                  color:
-                      Colors.white54,
-                  fontSize: 12,
-                ),
-              ),
-            ],
-          ),
-          const SizedBox(
-            height: 9,
-          ),
-          Text(
-            value,
-            style:
-                const TextStyle(
-              fontSize: 17,
-              fontWeight:
-                  FontWeight.w800,
-            ),
-          ),
-        ],
-      ),
-    );
-  }
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(18),
 
-  // ==========================================================================
-  // SERVERS PAGE
-  // ==========================================================================
+        child: Column(
+          crossAxisAlignment:
+              CrossAxisAlignment.start,
 
-  Widget _servers() {
-    return ListView(
-      padding:
-          const EdgeInsets.fromLTRB(
-        18,
-        18,
-        18,
-        24,
-      ),
-      children: [
-        header(
-          'سرورها',
-          '${servers.length} کانفیگ',
-        ),
-
-        Row(
           children: [
-            Expanded(
-              child: FilledButton.icon(
-                onPressed:
-                    testing ||
-                            servers.isEmpty
-                        ? null
-                        : () => testAll(),
-                icon:
-                    testing
-                        ? const SizedBox(
-                            width: 17,
-                            height: 17,
-                            child:
-                                CircularProgressIndicator(
-                              strokeWidth:
-                                  2,
-                            ),
-                          )
-                        : const Icon(
-                            Icons.speed,
-                          ),
-                label:
-                    Text(
-                  testing
-                      ? 'در حال تست'
-                      : 'تست سرورها',
-                ),
+            const Text(
+              'حساب Subscription',
+
+              style: TextStyle(
+                fontSize: 18,
+                fontWeight: FontWeight.bold,
               ),
             ),
-            const SizedBox(
-              width: 10,
-            ),
-            Expanded(
-              child:
-                  OutlinedButton.icon(
-                onPressed:
-                    loading
-                        ? null
-                        : () =>
-                            loadSubscription(),
-                icon:
-                    const Icon(
-                  Icons.refresh,
-                ),
-                label:
-                    const Text(
-                  'بروزرسانی',
-                ),
+
+            const SizedBox(height: 14),
+
+            if (total != null) ...[
+              LinearProgressIndicator(
+                value: ratio,
               ),
-            ),
-          ],
-        ),
 
-        const SizedBox(
-          height: 12,
-        ),
+              const SizedBox(height: 10),
 
-        if (servers.isEmpty)
-          card(
-            Column(
+              Text(
+                '${formatBytes(used ?? 0)} '
+                'مصرف شده از '
+                '${formatBytes(total)}',
+              ),
+            ] else
+              const Text(
+                'اطلاعات حجم از Subscription '
+                'دریافت نشد',
+              ),
+
+            const SizedBox(height: 10),
+
+            Row(
               children: [
-                const Icon(
-                  Icons.dns_outlined,
-                  size: 52,
-                  color:
-                      Colors.white38,
-                ),
-                const SizedBox(
-                  height: 12,
-                ),
-                const Text(
-                  'هنوز سروری وجود ندارد',
-                  style:
-                      TextStyle(
-                    fontWeight:
-                        FontWeight.bold,
+                Expanded(
+                  child: _info(
+                    'آپلود',
+                    formatBytes(
+                      subscription.upload ??
+                          uploadTotal,
+                    ),
                   ),
                 ),
-                const SizedBox(
-                  height: 6,
-                ),
-                const Text(
-                  'از بخش اشتراک، لینک Subscription خود را اضافه کن.',
-                  textAlign:
-                      TextAlign.center,
-                  style:
-                      TextStyle(
-                    color:
-                        Colors.white54,
-                    fontSize: 12,
+
+                Expanded(
+                  child: _info(
+                    'دانلود',
+                    formatBytes(
+                      subscription.download ??
+                          downloadTotal,
+                    ),
                   ),
                 ),
               ],
             ),
-          ),
 
-        ...servers.map(
-          (server) {
-            final isSelected =
-                selectedServer?.raw ==
-                    server.raw;
+            const SizedBox(height: 8),
 
-            return card(
-              InkWell(
-                onTap: () =>
-                    selectManualServer(
-                  server,
-                ),
-                borderRadius:
-                    BorderRadius.circular(
-                  18,
-                ),
-                child: Row(
-                  children: [
-                    Container(
-                      width: 44,
-                      height: 44,
-                      decoration:
-                          BoxDecoration(
-                        borderRadius:
-                            BorderRadius
-                                .circular(
-                          14,
-                        ),
-                        gradient:
-                            isSelected
-                                ? mainGradient
-                                : null,
-                        color:
-                            isSelected
-                                ? null
-                                : const Color(
-                                    0xFF151B28,
-                                  ),
-                      ),
-                      child:
-                          Icon(
-                        isSelected
-                            ? Icons.check
-                            : Icons.public,
-                      ),
+            _info(
+              'انقضا',
+
+              subscription.expire == null
+                  ? 'نامشخص'
+                  : formatExpire(
+                      subscription.expire!,
                     ),
-                    const SizedBox(
-                      width: 12,
-                    ),
-                    Expanded(
-                      child:
-                          Column(
-                        crossAxisAlignment:
-                            CrossAxisAlignment
-                                .start,
-                        children: [
-                          Text(
-                            server.name,
-                            maxLines: 1,
-                            overflow:
-                                TextOverflow
-                                    .ellipsis,
-                            style:
-                                const TextStyle(
-                              fontWeight:
-                                  FontWeight
-                                      .bold,
-                            ),
-                          ),
-                          const SizedBox(
-                            height: 4,
-                          ),
-                          Text(
-                            '${server.type} • ${server.host}:${server.port}',
-                            maxLines: 1,
-                            overflow:
-                                TextOverflow
-                                    .ellipsis,
-                            style:
-                                const TextStyle(
-                              color:
-                                  Colors.white38,
-                              fontSize: 10,
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-                    _pingWidget(
-                      server.ping,
-                    ),
-                  ],
-                ),
-              ),
-            );
-          },
-        ),
-      ],
-    );
-  }
-
-  Widget _pingWidget(
-    int? ping,
-  ) {
-    if (ping == null) {
-      return const Text(
-        '—',
-        style:
-            TextStyle(
-          color:
-              Colors.white38,
-        ),
-      );
-    }
-
-    return Column(
-      children: [
-        Text(
-          '$ping',
-          style:
-              const TextStyle(
-            fontWeight:
-                FontWeight.bold,
-          ),
-        ),
-        const Text(
-          'ms',
-          style:
-              TextStyle(
-            color:
-                Colors.white38,
-            fontSize: 9,
-          ),
-        ),
-      ],
-    );
-  }
-
-  // ==========================================================================
-  // TRAFFIC PAGE
-  // ==========================================================================
-
-  Widget _traffic() {
-    return ListView(
-      padding:
-          const EdgeInsets.fromLTRB(
-        18,
-        18,
-        18,
-        24,
-      ),
-      children: [
-        header(
-          'ترافیک و تست',
-          'وضعیت واقعی اتصال',
-        ),
-
-        Row(
-          children: [
-            Expanded(
-              child:
-                  _statCard(
-                icon:
-                    Icons.download,
-                title:
-                    'دانلود لحظه‌ای',
-                value:
-                    download,
-                iconColor:
-                    const Color(
-                  0xFF00E5FF,
-                ),
-              ),
-            ),
-            const SizedBox(
-              width: 10,
-            ),
-            Expanded(
-              child:
-                  _statCard(
-                icon:
-                    Icons.upload,
-                title:
-                    'آپلود لحظه‌ای',
-                value:
-                    upload,
-                iconColor:
-                    const Color(
-                  0xFF9C6CFF,
-                ),
-              ),
             ),
           ],
         ),
-
-        card(
-          Column(
-            crossAxisAlignment:
-                CrossAxisAlignment.start,
-            children: [
-              const Text(
-                'مصرف جلسه',
-                style:
-                    TextStyle(
-                  fontWeight:
-                      FontWeight.bold,
-                ),
-              ),
-              const SizedBox(
-                height: 16,
-              ),
-              _trafficRow(
-                'دانلود',
-                size(
-                  downloadTotalBytes,
-                ),
-                Icons.download,
-              ),
-              const SizedBox(
-                height: 12,
-              ),
-              _trafficRow(
-                'آپلود',
-                size(
-                  uploadTotalBytes,
-                ),
-                Icons.upload,
-              ),
-              const SizedBox(
-                height: 12,
-              ),
-              _trafficRow(
-                'مجموع',
-                size(
-                  downloadTotalBytes +
-                      uploadTotalBytes,
-                ),
-                Icons.data_usage,
-              ),
-            ],
-          ),
-        ),
-
-        card(
-          Column(
-            crossAxisAlignment:
-                CrossAxisAlignment.start,
-            children: [
-              const Text(
-                'تست سرعت واقعی',
-                style:
-                    TextStyle(
-                  fontWeight:
-                      FontWeight.bold,
-                ),
-              ),
-              const SizedBox(
-                height: 5,
-              ),
-              const Text(
-                'این تست ظرفیت شبکه را با موتور sing-box اندازه‌گیری می‌کند.',
-                style:
-                    TextStyle(
-                  color:
-                      Colors.white54,
-                  fontSize: 11,
-                ),
-              ),
-              const SizedBox(
-                height: 16,
-              ),
-              Row(
-                children: [
-                  Expanded(
-                    child:
-                        _testValue(
-                      'دانلود',
-                      testDownload,
-                      Icons.download,
-                    ),
-                  ),
-                  Expanded(
-                    child:
-                        _testValue(
-                      'آپلود',
-                      testUpload,
-                      Icons.upload,
-                    ),
-                  ),
-                  Expanded(
-                    child:
-                        _testValue(
-                      'Latency',
-                      testPing,
-                      Icons.timer,
-                    ),
-                  ),
-                ],
-              ),
-              const SizedBox(
-                height: 16,
-              ),
-              SizedBox(
-                width:
-                    double.infinity,
-                child:
-                    FilledButton.icon(
-                  onPressed:
-                      networkTestRunning
-                          ? stopSpeedTest
-                          : startSpeedTest,
-                  icon:
-                      Icon(
-                    networkTestRunning
-                        ? Icons.stop
-                        : Icons.speed,
-                  ),
-                  label:
-                      Text(
-                    networkTestRunning
-                        ? 'توقف تست'
-                        : 'شروع تست سرعت',
-                  ),
-                ),
-              ),
-            ],
-          ),
-        ),
-
-        card(
-          Column(
-            crossAxisAlignment:
-                CrossAxisAlignment.start,
-            children: [
-              const Text(
-                'STUN / NAT',
-                style:
-                    TextStyle(
-                  fontWeight:
-                      FontWeight.bold,
-                ),
-              ),
-              const SizedBox(
-                height: 14,
-              ),
-              _infoRow(
-                'Latency',
-                stunLatency,
-              ),
-              _infoRow(
-                'IP عمومی',
-                externalIp,
-              ),
-              _infoRow(
-                'NAT',
-                natType,
-              ),
-              const SizedBox(
-                height: 10,
-              ),
-              SizedBox(
-                width:
-                    double.infinity,
-                child:
-                    OutlinedButton.icon(
-                  onPressed:
-                      stunTestRunning
-                          ? stopStunTest
-                          : startStunTest,
-                  icon:
-                      Icon(
-                    stunTestRunning
-                        ? Icons.stop
-                        : Icons.network_check,
-                  ),
-                  label:
-                      Text(
-                    stunTestRunning
-                        ? 'توقف STUN'
-                        : 'تست STUN',
-                  ),
-                ),
-              ),
-            ],
-          ),
-        ),
-      ],
+      ),
     );
   }
 
-  Widget _trafficRow(
-    String title,
-    String value,
-    IconData icon,
-  ) {
-    return Row(
-      children: [
-        Icon(
-          icon,
-          size: 20,
-          color:
-              Colors.white54,
-        ),
-        const SizedBox(
-          width: 10,
-        ),
-        Expanded(
-          child: Text(
-            title,
-            style:
-                const TextStyle(
-              color:
-                  Colors.white54,
-            ),
-          ),
-        ),
-        Text(
-          value,
-          style:
-              const TextStyle(
-            fontWeight:
-                FontWeight.bold,
-          ),
-        ),
-      ],
-    );
-  }
-
-  Widget _testValue(
-    String title,
-    String value,
-    IconData icon,
-  ) {
-    return Column(
-      children: [
-        Icon(
-          icon,
-          size: 20,
-          color:
-              Colors.white54,
-        ),
-        const SizedBox(
-          height: 6,
-        ),
-        Text(
-          value,
-          textAlign:
-              TextAlign.center,
-          style:
-              const TextStyle(
-            fontWeight:
-                FontWeight.bold,
-            fontSize: 12,
-          ),
-        ),
-        const SizedBox(
-          height: 3,
-        ),
-        Text(
-          title,
-          style:
-              const TextStyle(
-            color:
-                Colors.white38,
-            fontSize: 10,
-          ),
-        ),
-      ],
-    );
-  }
-
-  Widget _infoRow(
+  Widget _info(
     String title,
     String value,
   ) {
     return Padding(
       padding:
           const EdgeInsets.symmetric(
-        vertical: 7,
+        vertical: 4,
       ),
-      child: Row(
+
+      child: Column(
+        crossAxisAlignment:
+            CrossAxisAlignment.start,
+
         children: [
-          Expanded(
-            child: Text(
-              title,
-              style:
-                  const TextStyle(
-                color:
-                    Colors.white54,
+          Text(
+            title,
+
+            style: TextStyle(
+              color:
+                  Colors.white.withValues(
+                alpha: .55,
               ),
+              fontSize: 12,
             ),
           ),
+
+          const SizedBox(height: 2),
+
           Text(
             value,
-            style:
-                const TextStyle(
-              fontWeight:
-                  FontWeight.bold,
+
+            style: const TextStyle(
+              fontWeight: FontWeight.w700,
             ),
           ),
         ],
@@ -4530,485 +1646,320 @@ class _HomePageState extends State<HomePage>
     );
   }
 
-  // ==========================================================================
-  // SUBSCRIPTION PAGE
-  // ==========================================================================
+  Widget _serverCard() {
+    final best = fastestServer();
 
-  Widget _subscription() {
-    final percent =
-        totalBytes == null ||
-                totalBytes! <= 0
-            ? 0.0
-            : ((usedBytes ?? 0) /
-                    totalBytes!)
-                .clamp(
-                0.0,
-                1.0,
-              );
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(18),
 
-    final expired =
-        expireAt != null &&
-            expireAt! > 0 &&
-            DateTime
-                .fromMillisecondsSinceEpoch(
-              expireAt! >
-                      20000000000
-                  ? expireAt!
-                  : expireAt! * 1000,
-            )
-                .isBefore(
-              DateTime.now(),
-            );
+        child: Column(
+          crossAxisAlignment:
+              CrossAxisAlignment.start,
 
-    return ListView(
-      padding:
-          const EdgeInsets.fromLTRB(
-        18,
-        18,
-        18,
-        24,
-      ),
-      children: [
-        header(
-          'اشتراک',
-          'مدیریت Subscription',
-        ),
+          children: [
+            Row(
+              children: [
+                const Expanded(
+                  child: Text(
+                    'سرورها',
 
-        card(
-          Column(
-            crossAxisAlignment:
-                CrossAxisAlignment.start,
-            children: [
-              const Text(
-                'آدرس Subscription',
-                style:
-                    TextStyle(
-                  fontWeight:
-                      FontWeight.bold,
-                ),
-              ),
-              const SizedBox(
-                height: 10,
-              ),
-              Container(
-                width:
-                    double.infinity,
-                padding:
-                    const EdgeInsets.all(
-                  12,
-                ),
-                decoration:
-                    BoxDecoration(
-                  color:
-                      const Color(
-                    0xFF080C14,
-                  ),
-                  borderRadius:
-                      BorderRadius.circular(
-                    14,
-                  ),
-                ),
-                child: Text(
-                  url.text.isEmpty
-                      ? 'هنوز اضافه نشده'
-                      : url.text,
-                  maxLines: 3,
-                  overflow:
-                      TextOverflow.ellipsis,
-                  textDirection:
-                      TextDirection.ltr,
-                  style:
-                      const TextStyle(
-                    color:
-                        Colors.white70,
-                    fontSize: 11,
-                  ),
-                ),
-              ),
-              const SizedBox(
-                height: 12,
-              ),
-              Row(
-                children: [
-                  Expanded(
-                    child:
-                        FilledButton.icon(
-                      onPressed:
-                          loading
-                              ? null
-                              : addSubscription,
-                      icon:
-                          const Icon(
-                        Icons.link,
-                      ),
-                      label:
-                          const Text(
-                        'افزودن / تغییر',
-                      ),
+                    style: TextStyle(
+                      fontSize: 18,
+                      fontWeight: FontWeight.bold,
                     ),
                   ),
-                  const SizedBox(
-                    width: 10,
-                  ),
-                  IconButton(
-                    onPressed:
-                        loading ||
-                                url.text
-                                    .isEmpty
-                            ? null
-                            : () =>
-                                loadSubscription(),
-                    tooltip:
-                        'بروزرسانی',
-                    icon:
-                        loading
-                            ? const SizedBox(
-                                width: 20,
-                                height: 20,
-                                child:
-                                    CircularProgressIndicator(
-                                  strokeWidth:
-                                      2,
-                                ),
-                              )
-                            : const Icon(
-                                Icons.refresh,
-                              ),
-                  ),
-                ],
-              ),
-            ],
-          ),
-        ),
+                ),
 
-        card(
-          Column(
-            children: [
-              Row(
-                children: [
-                  const Icon(
-                    Icons.data_usage,
-                    color:
-                        Color(
-                      0xFF9C6CFF,
+                DropdownButton<
+                    ServerSelectionMode>(
+                  value: selectionMode,
+
+                  items: const [
+                    DropdownMenuItem(
+                      value:
+                          ServerSelectionMode.auto,
+                      child: Text('خودکار'),
                     ),
-                  ),
-                  const SizedBox(
-                    width: 10,
-                  ),
-                  const Expanded(
-                    child:
-                        Text(
-                      'حجم مصرفی',
-                      style:
-                          TextStyle(
-                        fontWeight:
-                            FontWeight.bold,
-                      ),
+
+                    DropdownMenuItem(
+                      value:
+                          ServerSelectionMode.manual,
+                      child: Text('دستی'),
                     ),
-                  ),
-                  Text(
-                    '${size(usedBytes)} / ${size(totalBytes)}',
-                  ),
-                ],
-              ),
-              const SizedBox(
-                height: 14,
-              ),
-              ClipRRect(
-                borderRadius:
-                    BorderRadius.circular(
-                  20,
-                ),
-                child:
-                    LinearProgressIndicator(
-                  value:
-                      percent,
-                  minHeight: 9,
-                ),
-              ),
-            ],
-          ),
-        ),
+                  ],
 
-        card(
-          Column(
-            children: [
-              _infoRow(
-                'دانلود',
-                size(
-                  downloadBytes,
-                ),
-              ),
-              _infoRow(
-                'آپلود',
-                size(
-                  uploadBytes,
-                ),
-              ),
-              _infoRow(
-                'کل حجم',
-                size(
-                  totalBytes,
-                ),
-              ),
-              _infoRow(
-                'وضعیت',
-                expired
-                    ? 'منقضی شده'
-                    : 'فعال',
-              ),
-              _infoRow(
-                'انقضا',
-                expireAt == null ||
-                        expireAt! <= 0
-                    ? 'نامشخص'
-                    : _dateFromUnix(
-                        expireAt!,
-                      ),
-              ),
-              _infoRow(
-                'آخرین بروزرسانی',
-                lastUpdate == null
-                    ? 'هنوز انجام نشده'
-                    : _formatUpdate(
-                        lastUpdate!,
-                      ),
-              ),
-            ],
-          ),
-        ),
-        card(
-          const Column(
-            crossAxisAlignment:
-                CrossAxisAlignment.start,
-            children: [
-              Text(
-                'فرمت‌های قابل پشتیبانی',
-                style:
-                    TextStyle(
-                  fontWeight:
-                      FontWeight.bold,
-                ),
-              ),
-              SizedBox(
-                height: 10,
-              ),
-              Text(
-                '• Plain URI\n'
-                '• Base64\n'
-                '• URL-safe Base64\n'
-                '• JSON\n'
-                '• sing-box JSON\n'
-                '• VMess\n'
-                '• VLESS\n'
-                '• Trojan\n'
-                '• Shadowsocks\n'
-                '• Hysteria2\n'
-                '• TUIC\n'
-                '• SOCKS5',
-                style:
-                    TextStyle(
-                  color:
-                      Colors.white54,
-                  height: 1.7,
-                  fontSize: 12,
-                ),
-              ),
-            ],
-          ),
-        ),
-      ],
-    );
-  }
+                  onChanged: (value) async {
+                    if (value == null) return;
 
-  String _formatUpdate(
-    String value,
-  ) {
-    try {
-      final date =
-          DateTime.parse(value)
-              .toLocal();
+                    setState(() {
+                      selectionMode = value;
+                    });
 
-      return
-          '${date.year}/'
-          '${date.month.toString().padLeft(2, '0')}/'
-          '${date.day.toString().padLeft(2, '0')} '
-          '${date.hour.toString().padLeft(2, '0')}:'
-          '${date.minute.toString().padLeft(2, '0')}';
-    } catch (_) {
-      return value;
-    }
-  }
-  // ==========================================================================
-  // SETTINGS
-  // ==========================================================================
+                    final prefs =
+                        await SharedPreferences
+                            .getInstance();
 
-  Widget _settings() {
-    return ListView(
-      padding:
-          const EdgeInsets.fromLTRB(
-        18,
-        18,
-        18,
-        24,
-      ),
-      children: [
-        header(
-          'تنظیمات',
-          'Light speed',
-        ),
-
-        card(
-          Column(
-            children: [
-              ListTile(
-                contentPadding:
-                    EdgeInsets.zero,
-                leading:
-                    const Icon(
-                  Icons.auto_awesome,
-                ),
-                title:
-                    const Text(
-                  'انتخاب خودکار',
-                ),
-                subtitle:
-                    const Text(
-                  'اتصال به سریع‌ترین سرور',
-                ),
-                trailing:
-                    Switch(
-                  value:
-                      selectionMode ==
-                          ServerSelectionMode
-                              .auto,
-                  onChanged:
-                      (value) {
-                    if (value) {
-                      selectAutoMode();
-                    } else {
-                      setState(() {
-                        selectionMode =
-                            ServerSelectionMode
-                                .manual;
-                      });
-
-                      saveSelectionMode();
-                    }
+                    await prefs.setString(
+                      'selection_mode',
+                      value ==
+                              ServerSelectionMode
+                                  .auto
+                          ? 'auto'
+                          : 'manual',
+                    );
                   },
                 ),
-              ),
-              const Divider(
-                height: 1,
-              ),
-              ListTile(
-                contentPadding:
-                    EdgeInsets.zero,
-                leading:
-                    const Icon(
-                  Icons.speed,
-                ),
-                title:
-                    const Text(
-                  'تست سرعت شبکه',
-                ),
-                subtitle:
-                    Text(
-                  '$testDownload / $testUpload',
-                ),
-                trailing:
-                    IconButton(
-                  onPressed:
-                      networkTestRunning
-                          ? stopSpeedTest
-                          : startSpeedTest,
-                  icon:
-                      Icon(
-                    networkTestRunning
-                        ? Icons.stop
-                        : Icons.play_arrow,
-                  ),
-                ),
-              ),
-              const Divider(
-                height: 1,
-              ),
-              ListTile(
-                contentPadding:
-                    EdgeInsets.zero,
-                leading:
-                    const Icon(
-                  Icons.network_check,
-                ),
-                title:
-                    const Text(
-                  'تست STUN',
-                ),
-                subtitle:
-                    Text(
-                  stunLatency == '—'
-                      ? 'اجرا نشده'
-                      : stunLatency,
-                ),
-                trailing:
-                    IconButton(
-                  onPressed:
-                      stunTestRunning
-                          ? stopStunTest
-                          : startStunTest,
-                  icon:
-                      Icon(
-                    stunTestRunning
-                        ? Icons.stop
-                        : Icons.play_arrow,
-                  ),
-                ),
-              ),
-            ],
-          ),
-        ),
+              ],
+            ),
 
-        card(
-          Column(
-            crossAxisAlignment:
-                CrossAxisAlignment.start,
-            children: [
+            const SizedBox(height: 10),
+
+            if (servers.isEmpty)
               const Text(
-                'اطلاعات برنامه',
-                style:
-                    TextStyle(
-                  fontWeight:
-                      FontWeight.bold,
+                'هنوز سروری دریافت نشده',
+              )
+            else
+              ...servers
+                  .take(12)
+                  .map(
+                    (server) =>
+                        _serverTile(
+                      server,
+                      best == server,
+                    ),
+                  ),
+
+            if (servers.length > 12)
+              Padding(
+                padding:
+                    const EdgeInsets.only(
+                  top: 8,
+                ),
+
+                child: Text(
+                  '${servers.length - 12} '
+                  'سرور دیگر...',
+
+                  style: TextStyle(
+                    color:
+                        Colors.white.withValues(
+                      alpha: .5,
+                    ),
+                  ),
                 ),
               ),
-              const SizedBox(
-                height: 12,
+
+            const SizedBox(height: 12),
+
+            OutlinedButton.icon(
+              onPressed:
+                  testing ? null : testAll,
+
+              icon: const Icon(
+                Icons.speed_rounded,
               ),
-              const Text(
-                'Light speed',
-                style:
-                    TextStyle(
-                  color:
-                      Colors.white70,
-                ),
+
+              label: Text(
+                testing
+                    ? 'در حال تست...'
+                    : 'Ping همه سرورها',
               ),
-              const SizedBox(
-                height: 4,
-              ),
-              const Text(
-                'sing-box VPN Client',
-                style:
-                    TextStyle(
-                  color:
-                      Colors.white38,
-                  fontSize: 11,
-                ),
-              ),
-            ],
-          ),
+            ),
+          ],
         ),
-      ],
+      ),
     );
   }
+    Widget _serverTile(ServerNode server) {
+    final selected = selectedServer?.id == server.id;
+    final connecting = isConnecting && selected;
+
+    return Container(
+      margin: const EdgeInsets.only(bottom: 10),
+      decoration: BoxDecoration(
+        color: selected
+            ? const Color(0xFF00D4FF).withValues(alpha: .10)
+            : Colors.white.withValues(alpha: .04),
+        borderRadius: BorderRadius.circular(18),
+        border: Border.all(
+          color: selected
+              ? const Color(0xFF00D4FF).withValues(alpha: .45)
+              : Colors.white.withValues(alpha: .07),
+        ),
+      ),
+      child: InkWell(
+        borderRadius: BorderRadius.circular(18),
+        onTap: () {
+          setState(() {
+            selectedServer = server;
+          });
+          _saveSelectedServer();
+        },
+        child: Padding(
+          padding: const EdgeInsets.all(14),
+          child: Row(
+            children: [
+              Container(
+                width: 44,
+                height: 44,
+                decoration: BoxDecoration(
+                  color: selected
+                      ? const Color(0xFF00D4FF).withValues(alpha: .15)
+                      : Colors.white.withValues(alpha: .06),
+                  shape: BoxShape.circle,
+                ),
+                child: Icon(
+                  server.type == 'vless'
+                      ? Icons.bolt_rounded
+                      : server.type == 'vmess'
+                          ? Icons.cloud_outlined
+                          : Icons.public_rounded,
+                  color: selected
+                      ? const Color(0xFF00D4FF)
+                      : Colors.white70,
+                ),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      server.name,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(
+                        fontWeight: FontWeight.w700,
+                        fontSize: 15,
+                      ),
+                    ),
+                    const SizedBox(height: 5),
+                    Text(
+                      '${server.host}:${server.port}',
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(
+                        color: Colors.white54,
+                        fontSize: 11,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(width: 8),
+              if (connecting)
+                const SizedBox(
+                  width: 20,
+                  height: 20,
+                  child: CircularProgressIndicator(
+                    strokeWidth: 2,
+                  ),
+                )
+              else if (server.ping != null)
+                Container(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 9,
+                    vertical: 5,
+                  ),
+                  decoration: BoxDecoration(
+                    color: pingColor(server.ping).withValues(alpha: .12),
+                    borderRadius: BorderRadius.circular(10),
+                  ),
+                  child: Text(
+                    '${server.ping} ms',
+                    style: TextStyle(
+                      color: pingColor(server.ping),
+                      fontSize: 11,
+                      fontWeight: FontWeight.w700,
+                    ),
+                  ),
+                )
+              else
+                const Icon(
+                  Icons.chevron_right_rounded,
+                  color: Colors.white38,
+                ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _subscriptionButton() {
+    return OutlinedButton.icon(
+      onPressed: loadingSubscription ? null : _showSubscriptionDialog,
+      icon: const Icon(Icons.link_rounded, size: 18),
+      label: const Text('مدیریت لینک اشتراک'),
+      style: OutlinedButton.styleFrom(
+        foregroundColor: const Color(0xFF00D4FF),
+        side: BorderSide(
+          color: const Color(0xFF00D4FF).withValues(alpha: .35),
+        ),
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(14),
+        ),
+        padding: const EdgeInsets.symmetric(
+          horizontal: 16,
+          vertical: 13,
+        ),
+      ),
+    );
+  }
+}
+
+String formatSpeed(int bitsPerSecond) {
+  final bytes = bitsPerSecond / 8;
+  return '${formatBytes(bytes.round())}/s';
+}
+
+String formatBytes(int bytes) {
+  if (bytes < 1024) return '$bytes B';
+
+  const units = ['KB', 'MB', 'GB', 'TB'];
+  double value = bytes / 1024;
+  var index = 0;
+
+  while (value >= 1024 && index < units.length - 1) {
+    value /= 1024;
+    index++;
+  }
+
+  return '${value.toStringAsFixed(value >= 100 ? 0 : 1)} ${units[index]}';
+}
+
+String formatExpire(int timestamp) {
+  var seconds = timestamp;
+
+  if (timestamp > 100000000000) {
+    seconds = timestamp ~/ 1000;
+  }
+
+  final date = DateTime.fromMillisecondsSinceEpoch(
+    seconds * 1000,
+    isUtc: true,
+  ).toLocal();
+
+  final now = DateTime.now();
+  final remaining = date.difference(now);
+
+  if (remaining.isNegative) {
+    return 'منقضی شده';
+  }
+
+  final days = remaining.inDays;
+  final hours = remaining.inHours % 24;
+
+  return '${date.year}/'
+      '${date.month.toString().padLeft(2, '0')}/'
+      '${date.day.toString().padLeft(2, '0')} • '
+      '$days روز و $hours ساعت';
+}
+
+Color pingColor(int? ping) {
+  if (ping == null) return Colors.white54;
+  if (ping <= 80) return Colors.greenAccent;
+  if (ping <= 150) return Colors.orangeAccent;
+  return Colors.redAccent;
 }
