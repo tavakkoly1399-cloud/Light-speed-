@@ -1098,16 +1098,24 @@ class _HomePageState extends State<HomePage>
       'dns': {
         'servers': [
           {
+            'type': 'https',
             'tag': 'dns-remote',
-            'address': 'https://1.1.1.1/dns-query',
+            'server': '1.1.1.1',
+            'server_port': 443,
+            'path': '/dns-query',
+            'tls': {
+              'enabled': true,
+              'server_name': 'cloudflare-dns.com',
+            },
             'detour': 'proxy',
           },
           {
+            'type': 'local',
             'tag': 'dns-direct',
-            'address': 'local',
           },
         ],
         'final': 'dns-remote',
+        'strategy': 'prefer_ipv4',
       },
 
       'inbounds': [
@@ -1125,7 +1133,6 @@ class _HomePageState extends State<HomePage>
           // Force Android's VPN/TUN routing path to handle all routed
           // traffic and help prevent traffic/DNS leaks when auto_route
           // is enabled.
-          'strict_route': true,
 
           // mixed is better for normal TCP + UDP apps
           // such as Telegram and other mobile applications.
@@ -1133,14 +1140,11 @@ class _HomePageState extends State<HomePage>
 
           'mtu': 1400,
 
-          'dns_mode': 'hijack',
 
           'endpoint_independent_nat': true,
 
           'sniff': true,
-          'sniff_override_destination': false,
 
-          'domain_strategy': 'prefer_ipv4',
         },
       ],
 
@@ -1170,7 +1174,12 @@ class _HomePageState extends State<HomePage>
           },
 
           {
-            'protocol': 'dns',
+            'type': 'logical',
+            'mode': 'or',
+            'rules': [
+              {'protocol': 'dns'},
+              {'port': 53},
+            ],
             'action': 'hijack-dns',
           },
 
