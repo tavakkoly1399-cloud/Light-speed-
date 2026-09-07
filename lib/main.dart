@@ -116,7 +116,7 @@ class _HomePageState extends State<HomePage>
 
     refreshTimer = Timer.periodic(
       const Duration(minutes: 15),
-      (_) => loadSubscription(silent: true),
+      (_) => (connected || connecting) ? null : loadSubscription(silent: true),
     );
   }
 
@@ -1251,7 +1251,7 @@ class _HomePageState extends State<HomePage>
           },
         ],
         'final': 'dns-remote',
-        'strategy': 'prefer_ipv4',
+        'strategy': 'ipv4_only',
       },
 
       'inbounds': [
@@ -1279,8 +1279,6 @@ class _HomePageState extends State<HomePage>
 
           'endpoint_independent_nat': true,
 
-          'sniff': true,
-
         },
       ],
 
@@ -1301,7 +1299,6 @@ class _HomePageState extends State<HomePage>
       'route': {
         // Keep the upstream connection outside
         // the Android VPN/TUN loop when supported.
-        'auto_detect_interface': true,
         'override_android_vpn': true,
 
         'rules': [
