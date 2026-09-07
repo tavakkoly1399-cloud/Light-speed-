@@ -994,6 +994,99 @@ class _HomePageState extends State<HomePage>
     return valid.first;
   }
 
+  Future<String> _waitForVpnStart({
+    Duration timeout = const Duration(seconds: 20),
+  }) async {
+    try {
+      final result = await Future.any<String>([
+        vpn.serviceStateStream
+            .map((state) => state.toString().toLowerCase())
+            .firstWhere((state) =>
+                state.contains('started') ||
+                state.contains('running') ||
+                state.contains('connected') ||
+                state.contains('stopped') ||
+                state.contains('disconnected')),
+        vpn.faultStream
+            .map((error) => 'fault:$error')
+            .first,
+        Future<String>.delayed(
+          timeout,
+          () => 'timeout',
+        ),
+      ]);
+
+      return result;
+    } catch (e) {
+      return 'fault:$e';
+    }
+  }
+
+  Future<void> _connectSingleNode(ServerNode node) async {
+    final config = buildSingboxConfig(node);
+    final json = jsonEncode(config);
+
+    // Validate with the same sing-box core that will actually run.
+    await vpn.checkConfig(json);
+
+    final permission = await vpn.requestVPNPermission();
+    if (!permission) {
+      throw Exception('مجوز VPN داده نشد');
+    }
+
+    // If an old session is still running, stop it before starting
+    // a new profile. This makes server switching reliable.
+    try {
+      final current = await vpn.getServiceState();
+      final currentText = current.toString().toLowerCase();
+      if (currentText.contains('started') ||
+          currentText.contains('running') ||
+          currentText.contains('connected') ||
+          currentText.contains('starting')) {
+        await vpn.disconnect();
+        await Future<void>.delayed(
+          const Duration(milliseconds: 400),
+        );
+      }
+    } catch (_) {}
+
+    await vpn.connect(
+      SessionOptions(
+        config: json,
+        networkMode: NetworkMode.vpn,
+        notification: NotificationConfig(
+          title: 'Light speed',
+          showTrafficStats: true,
+          showStopButton: true,
+          stopButtonLabel: 'قطع VPN',
+        ),
+      ),
+    );
+
+    final result = await _waitForVpnStart();
+
+    if (result == 'timeout') {
+      await _syncVpnState();
+      final state = await vpn.getServiceState();
+      final text = state.toString().toLowerCase();
+      if (text.contains('started') ||
+          text.contains('running') ||
+          text.contains('connected')) {
+        return;
+      }
+      throw Exception('هسته VPN در زمان مقرر متصل نشد');
+    }
+
+    if (result.startsWith('fault:')) {
+      throw Exception(result.substring(6));
+    }
+
+    if (result.contains('stopped') ||
+        result.contains('disconnected')) {
+      throw Exception('هسته VPN بلافاصله متوقف شد');
+    }
+  }
+
   Future<void> connectVpn() async {
     if (connecting) return;
 
@@ -1002,49 +1095,92 @@ class _HomePageState extends State<HomePage>
       if (servers.isEmpty) return;
     }
 
-    ServerNode? node = selectedServer;
-
-    if (selectionMode == ServerSelectionMode.auto) {
-      await testAll(silent: true);
-      node = fastestServer();
-    }
-
-    node ??= servers.first;
-
     setState(() {
-      selectedServer = node;
       connecting = true;
-      status = 'در حال آماده‌سازی VPN...';
+      status = 'در حال پیدا کردن بهترین سرور...';
     });
 
     try {
-      final config = buildSingboxConfig(node);
-
-      await vpn.checkConfig(
-        jsonEncode(config),
-      );
-
-      final permission =
-          await vpn.requestVPNPermission();
-
-      if (!permission) {
-        throw Exception('مجوز VPN داده نشد');
+      if (selectionMode == ServerSelectionMode.auto) {
+        await testAll(silent: true);
       }
 
-      await vpn.connect(
-        SessionOptions(
-          config: jsonEncode(config),
-          networkMode: NetworkMode.vpn,
-          notification: NotificationConfig(
-            title: 'Light speed',
-            showTrafficStats: true,
-            showStopButton: true,
-            stopButtonLabel: 'قطع VPN',
-          ),
-        ),
-      );
+      final candidates = <ServerNode>[];
 
-      await _syncVpnState();
+      if (selectionMode == ServerSelectionMode.manual &&
+          selectedServer != null) {
+        candidates.add(selectedServer!);
+      } else {
+        final sorted = servers
+            .where((server) => server.pingMs != null)
+            .toList()
+          ..sort((a, b) =>
+              a.pingMs!.compareTo(b.pingMs!));
+
+        candidates.addAll(sorted);
+
+        // Include untested nodes as a fallback.
+        for (final server in servers) {
+          if (!candidates.contains(server)) {
+            candidates.add(server);
+          }
+        }
+      }
+
+      if (candidates.isEmpty) {
+        throw Exception('هیچ سرور قابل استفاده‌ای پیدا نشد');
+      }
+
+      Object? lastError;
+
+      // Try the fastest server first. If its real tunnel fails,
+      // automatically try the next server, similar to Smart/Auto
+      // connection behaviour in mature VPN clients.
+      for (var i = 0; i < candidates.length; i++) {
+        final node = candidates[i];
+
+        if (!mounted) return;
+        setState(() {
+          selectedServer = node;
+          connecting = true;
+          status = 'در حال اتصال به ${node.name}...';
+        });
+
+        try {
+          await _connectSingleNode(node);
+          await _saveSelected();
+
+          if (!mounted) return;
+          setState(() {
+            connected = true;
+            connecting = false;
+            status = 'VPN متصل است • ${node.name}';
+          });
+          return;
+        } catch (e) {
+          lastError = e;
+          debugPrint(
+            'Node connection failed: ${node.name}: $e',
+          );
+
+          try {
+            await vpn.disconnect();
+          } catch (_) {}
+
+          if (i + 1 < candidates.length && mounted) {
+            setState(() {
+              status = 'سرور فعلی وصل نشد؛ در حال امتحان سرور بعدی...';
+            });
+            await Future<void>.delayed(
+              const Duration(milliseconds: 500),
+            );
+          }
+        }
+      }
+
+      throw Exception(
+        'هیچ‌کدام از سرورها به‌صورت واقعی وصل نشدند. آخرین خطا: $lastError',
+      );
     } catch (e) {
       debugPrint('Connect error: $e');
 
