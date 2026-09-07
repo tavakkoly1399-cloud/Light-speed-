@@ -228,7 +228,6 @@ class _HomePageState extends State<HomePage>
 
         final text = state.toString();
         final low = text.toLowerCase();
-
         setState(() {
           stateText = _prettyState(text);
 
@@ -291,7 +290,6 @@ class _HomePageState extends State<HomePage>
     faultSub = vpn.faultStream.listen(
       (error) {
         if (!mounted) return;
-
         final message = error.toString();
 
         debugPrint(
@@ -333,7 +331,6 @@ class _HomePageState extends State<HomePage>
                     'isRunning',
                   ) ??
                   false;
-
           final double down =
               (_dynamicNum(
                     p,
@@ -354,7 +351,6 @@ class _HomePageState extends State<HomePage>
             p,
             'idleLatencyMs',
           );
-
           final dRpm = _dynamicInt(
             p,
             'downloadRPM',
@@ -459,7 +455,6 @@ class _HomePageState extends State<HomePage>
         );
 
         if (!mounted) return;
-
         setState(() {
           stunTestRunning = false;
         });
@@ -564,7 +559,6 @@ class _HomePageState extends State<HomePage>
     );
 
     if (value == null) return null;
-
     return value.toString();
   }
 
@@ -627,7 +621,6 @@ class _HomePageState extends State<HomePage>
           : 'auto',
     );
   }
-
   Future<void> saveSelectedServer() async {
     final prefs =
         await SharedPreferences.getInstance();
@@ -648,7 +641,6 @@ class _HomePageState extends State<HomePage>
   // ==========================================================================
   // SUBSCRIPTION
   // ==========================================================================
-
   Future<void> addSubscription() async {
     final controller = TextEditingController(
       text: url.text,
@@ -837,7 +829,6 @@ class _HomePageState extends State<HomePage>
 
         final key =
             _serverFingerprint(server);
-
         if (fingerprints.add(key)) {
           parsed.add(server);
         }
@@ -963,7 +954,6 @@ class _HomePageState extends State<HomePage>
 
     return null;
   }
-
   // ==========================================================================
   // USER INFO
   // ==========================================================================
@@ -1110,7 +1100,6 @@ class _HomePageState extends State<HomePage>
     // ------------------------------------------------------------------------
     // 4. Base64 / URL-safe Base64
     // ------------------------------------------------------------------------
-
     if (result.isEmpty) {
       final decoded =
           _tryDecodeBase64Text(trimmed);
@@ -1173,7 +1162,6 @@ class _HomePageState extends State<HomePage>
       if (value.isEmpty) {
         continue;
       }
-
       value = value.replaceFirst(
         '\uFEFF',
         '',
@@ -1320,7 +1308,6 @@ class _HomePageState extends State<HomePage>
         'JSON subscription error: $e',
       );
     }
-
     return result;
   }
 
@@ -1656,7 +1643,6 @@ class _HomePageState extends State<HomePage>
           uuid.isEmpty) {
         return null;
       }
-
       final outbound =
           <String, dynamic>{
         'type': 'vmess',
@@ -1782,7 +1768,6 @@ class _HomePageState extends State<HomePage>
           'fingerprint': fp,
         };
       }
-
       if (security == 'reality' &&
           (p['pbk'] ?? '').isNotEmpty) {
         tls['reality'] = {
@@ -1929,7 +1914,6 @@ class _HomePageState extends State<HomePage>
             raw.substring(
           raw.indexOf('://') + 3,
         );
-
         encoded =
             encoded.split('#').first;
 
@@ -1950,7 +1934,6 @@ class _HomePageState extends State<HomePage>
           allowMalformed: true,
         );
       }
-
       final separator =
           user.indexOf(':');
 
@@ -2013,7 +1996,6 @@ class _HomePageState extends State<HomePage>
       outbound: hysteria2(uri),
     );
   }
-
   Map<String, dynamic> hysteria2(
     Uri uri,
   ) {
@@ -2034,7 +2016,6 @@ class _HomePageState extends State<HomePage>
                 uri.host,
       },
     };
-
     if (p['insecure'] == '1') {
       (outbound['tls']
           as Map<String, dynamic>)['insecure'] =
@@ -2076,7 +2057,6 @@ class _HomePageState extends State<HomePage>
     Uri uri,
   ) {
     final p = uri.queryParameters;
-
     final outbound =
         <String, dynamic>{
       'type': 'tuic',
@@ -2391,7 +2371,6 @@ class _HomePageState extends State<HomePage>
           (s) => s.ping != null,
         )
         .toList();
-
     if (good.isEmpty) {
       return null;
     }
@@ -2433,7 +2412,6 @@ class _HomePageState extends State<HomePage>
 
     await saveSelectionMode();
     await saveSelectedServer();
-
     snack(
       'سرور ${server.name} انتخاب شد',
     );
@@ -2580,7 +2558,6 @@ class _HomePageState extends State<HomePage>
       await vpn.checkConfig(
         config,
       );
-
       if (mounted) {
         setState(() {
           stateText =
@@ -2643,7 +2620,6 @@ class _HomePageState extends State<HomePage>
       );
     }
   }
-
   // ==========================================================================
   // DISCONNECT
   // ==========================================================================
@@ -2706,7 +2682,6 @@ class _HomePageState extends State<HomePage>
       debugPrint(
         'Speed test error: $e',
       );
-
       if (!mounted) return;
 
       setState(() {
@@ -2727,7 +2702,6 @@ class _HomePageState extends State<HomePage>
         'Stop speed test: $e',
       );
     }
-
     if (!mounted) return;
 
     setState(() {
@@ -2832,7 +2806,6 @@ class _HomePageState extends State<HomePage>
         Map<String, dynamic>.from(
       server.outbound,
     );
-
     outbound.remove('tag');
 
     return jsonEncode(
@@ -3882,7 +3855,6 @@ class _HomePageState extends State<HomePage>
       ),
     );
   }
-
   // ==========================================================================
   // STAT CARD
   // ==========================================================================
@@ -4806,7 +4778,6 @@ class _HomePageState extends State<HomePage>
             ],
           ),
         ),
-
         card(
           const Column(
             crossAxisAlignment:
@@ -4869,7 +4840,6 @@ class _HomePageState extends State<HomePage>
       return value;
     }
   }
-
   // ==========================================================================
   // SETTINGS
   // ==========================================================================
